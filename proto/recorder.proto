@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package recorder;
+
+
+option go_package = "github.com/brotherlogic/recorder/proto";
+
+message NewRecordRequest{}
+
+message NewRecordResponse{}
+
+service RecordGetter {
+  rpc NewRecord(NewRecordRequest) returns (NewRecordResponse);
+}
