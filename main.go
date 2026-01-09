@@ -82,4 +82,8 @@ func main() {
 		log.Printf("Error recording: %v", err)
 		time.Sleep(time.Second * 5)
 	}()
+
+	for {
+		time.Sleep(time.Second)
+	}
 }
