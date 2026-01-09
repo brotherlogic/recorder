@@ -61,7 +61,7 @@ func (r *Recorder) runRecord() error {
 		diskRef = fmt.Sprintf("%v-%v.wav", num, date)
 	}
 
-	r.cmd = exec.Command("arecord", "--device=\"hw:2,0\"", "--format=S32_LE", "--rate=44100", "--channels=4", diskRef)
+	r.cmd = exec.Command("arecord", "--device", "\"hw:2,0\"", "--format", "S32_LE", "--rate", "44100", "--channels", "4", diskRef)
 	output, err := r.cmd.CombinedOutput()
 	log.Printf("Error: %v -> %v", err, string(output))
 	r.cmd.Wait()
