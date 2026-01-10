@@ -89,9 +89,11 @@ func (s *Server) NewRecord(ctx context.Context, _ *pb.NewRecordRequest) (*pb.New
 func main() {
 	r := &Recorder{}
 	go func() {
-		err := r.runRecord()
-		log.Printf("Error recording: %v", err)
-		time.Sleep(time.Second * 5)
+		for {
+			err := r.runRecord()
+			log.Printf("Error recording: %v", err)
+			time.Sleep(time.Second * 5)
+		}
 	}()
 
 	s := &Server{r: r}
