@@ -121,6 +121,7 @@ func (s *Server) processFiles(dir string) error {
 			return err
 		}
 
+		log.Printf("GLOB %v%v*.wav", *procDir, strippedFile)
 		files, err = filepath.Glob(fmt.Sprintf("%v%v*.wav", *procDir, strippedFile))
 		if err != nil {
 			return err
