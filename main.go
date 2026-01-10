@@ -95,7 +95,7 @@ func (s *Server) processFiles(dir string) error {
 		// Convert to flac
 		files, err := filepath.Glob(fmt.Sprintf("%v%v_track_*.wav", *procDir, strippedFile))
 		if err != nil {
-		return err
+			return err
 		}
 		args := []string{"--best", "--delete-input-file", "--output-prefix", *procDir}
 		args = append(args, files...)
@@ -109,7 +109,7 @@ func (s *Server) processFiles(dir string) error {
 		log.Printf("Error in mkdir: %v", err)
 		files, err = filepath.Glob(fmt.Sprintf("%v%v*track*.flac", *procDir, selems[0]))
 		if err != nil {
-		return err
+			return err
 		}
 		args = append([]string{}, files...)
 		args = append(args, fmt.Sprintf("%v/%v/", *saveDir, selems[0]))
@@ -121,7 +121,11 @@ func (s *Server) processFiles(dir string) error {
 			return err
 		}
 
-		rmCmd := exec.Command("rm", fmt.Sprintf("%v%v", *procDir, file.Name()))
+		files, err = filepath.Glob(fmt.Sprintf("%v%v*.wav", *procDir, selems[0]))
+		if err != nil {
+			return err
+		}
+		rmCmd := exec.Command("rm", append([]string{}, files...)...)
 		out, err := rmCmd.CombinedOutput()
 		log.Printf("RM %v -> %v", err, string(out))
 	}
@@ -155,8 +159,8 @@ func (r *Recorder) runRecord() error {
 	output, err = moveCmd.CombinedOutput()
 	log.Printf("Moved files %v -> %v", err, string(output))
 
-	if err != nil{
-	return err
+	if err != nil {
+		return err
 	}
 
 	return nil
