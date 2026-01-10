@@ -2,15 +2,22 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os/exec"
 	"time"
 
 	"github.com/brotherlogic/goserver/utils"
+	"google.golang.org/grpc"
 
 	pb "github.com/brotherlogic/recorder/proto"
 	pbrg "github.com/brotherlogic/recordgetter/proto"
+)
+
+var (
+	port = flag.Int("port", 8080, "Port to server from")
 )
 
 type Recorder struct {
@@ -69,22 +76,30 @@ func (r *Recorder) runRecord() error {
 	return nil
 }
 
-func (s *Server) NewRecord(ctx context.Context, _ *pb.NewRecordRequest) {
+func (s *Server) NewRecord(ctx context.Context, _ *pb.NewRecordRequest) (*pb.NewRecordResponse, error) {
 	// Halt the current recording
 	c := exec.Command("killall", "arecord")
 	c.Start()
 	c.Wait()
+	return &pb.NewRecordResponse{}, nil
 }
 
 func main() {
+	r := &Recorder{}
 	go func() {
-		r := &Recorder{}
 		err := r.runRecord()
 		log.Printf("Error recording: %v", err)
 		time.Sleep(time.Second * 5)
 	}()
 
-	for {
-		time.Sleep(time.Second)
+	s := &Server{r: r}
+
+	lis, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", *port))
+	if err != nil {
+		log.Fatalf("failed to listen: %v", err)
 	}
+	var opts []grpc.ServerOption
+	grpcServer := grpc.NewServer(opts...)
+	pb.RegisterRecordGetterServer(grpcServer, s)
+	grpcServer.Serve(lis)
 }
