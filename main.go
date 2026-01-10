@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -21,7 +22,7 @@ import (
 
 var (
 	port    = flag.Int("port", 8080, "Port to server from")
-	procDir = flag.String("processing_dir", "/home/simon/processing", "Directory to processing recordings")
+	procDir = flag.String("processing_dir", "/home/simon/processing/", "Directory to processing recordings")
 	saveDir = flag.String("save_dir", "/home/simon/music/flacs/", "Directory to save recordings")
 )
 
@@ -80,9 +81,10 @@ func (s *Server) processFiles(dir string) error {
 
 		strippedFile := file.Name()[:len(file.Name())-4]
 		elems := strings.Split(file.Name(), "-")
+		selems := strings.Split(elems[0], "_")
 
 		// Process the file
-		soxCmd := exec.Command("sox", file.Name(), fmt.Sprintf("%v_track_.wav", strippedFile), "silence", "1", "0.5", "1%", "1", "0.5", "1%", ":", "newfile", ":", "restart")
+		soxCmd := exec.Command("sox", fmt.Sprintf("%v%v", *procDir, file.Name()), fmt.Sprintf("%v%v_track_.wav", *procDir, strippedFile), "silence", "1", "0.5", "1%", "1", "0.5", "1%", ":", "newfile", ":", "restart")
 		log.Printf("Running sox command: %v", soxCmd.String())
 		output, err := soxCmd.CombinedOutput()
 		log.Printf("Sox output: %v -> %v", err, string(output))
@@ -91,23 +93,37 @@ func (s *Server) processFiles(dir string) error {
 		}
 
 		// Convert to flac
-		flacCmd := exec.Command("flac", "--best", "--delete-input-file", fmt.Sprintf("%v_track_.wav", strippedFile))
-		log.Printf("Running flac command: %v", flacCmd.String())
-		output, err = flacCmd.CombinedOutput()
-		log.Printf("Flac output: %v -> %v", err, string(output))
+		files, err := filepath.Glob(fmt.Sprintf("%v%v_track_*.wav", *procDir, strippedFile))
 		if err != nil {
-			return err
+		return err
 		}
+		args := []string{"--best", "--delete-input-file", "--output-prefix", *procDir}
+		args = append(args, files...)
+		flacCmd := exec.Command("flac", args...)
+		log.Printf("Running flac command: %v", flacCmd.String())
+		output, _ = flacCmd.CombinedOutput()
+		log.Printf("Flac output: %v -> %v", err, string(output))
 
 		//Move file into save dir - we don't care if this fails
-		os.Mkdir(fmt.Sprintf("%v/%v", *saveDir, elems[0]), 0755)
-		moveCmd := exec.Command("mv", fmt.Sprintf("%v.*track.*.flac", elems[0]), fmt.Sprintf("%v/%v/", *saveDir, elems[0]))
+		err = os.Mkdir(fmt.Sprintf("%v/%v", *saveDir, selems[0]), 0755)
+		log.Printf("Error in mkdir: %v", err)
+		files, err = filepath.Glob(fmt.Sprintf("%v%v*track*.flac", *procDir, selems[0]))
+		if err != nil {
+		return err
+		}
+		args = append([]string{}, files...)
+		args = append(args, fmt.Sprintf("%v/%v/", *saveDir, selems[0]))
+		moveCmd := exec.Command("mv", args...)
 		log.Printf("Running move command: %v", moveCmd.String())
 		output, err = moveCmd.CombinedOutput()
 		log.Printf("Move output: %v -> %v", err, string(output))
 		if err != nil {
 			return err
 		}
+
+		rmCmd := exec.Command("rm", fmt.Sprintf("%v%v", *procDir, file.Name()))
+		out, err := rmCmd.CombinedOutput()
+		log.Printf("RM %v -> %v", err, string(out))
 	}
 
 	return nil
@@ -139,6 +155,10 @@ func (r *Recorder) runRecord() error {
 	output, err = moveCmd.CombinedOutput()
 	log.Printf("Moved files %v -> %v", err, string(output))
 
+	if err != nil{
+	return err
+	}
+
 	return nil
 }
 
@@ -152,13 +172,13 @@ func (s *Server) NewRecord(ctx context.Context, _ *pb.NewRecordRequest) (*pb.New
 
 func main() {
 	r := &Recorder{}
-	go func() {
+	/*go func() {
 		for {
 			err := r.runRecord()
 			log.Printf("Error recording: %v", err)
 			time.Sleep(time.Second * 5)
 		}
-	}()
+	}()*/
 
 	s := &Server{r: r}
 
