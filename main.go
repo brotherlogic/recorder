@@ -117,9 +117,7 @@ func (s *Server) processFiles(dir string) error {
 		log.Printf("Running move command: %v", moveCmd.String())
 		output, err = moveCmd.CombinedOutput()
 		log.Printf("Move output: %v -> %v", err, string(output))
-		if err != nil {
-			return err
-		}
+		// We expect errors here if the file is blank - ignore this
 
 		log.Printf("GLOB %v%v*.wav", *procDir, strippedFile)
 		files, err = filepath.Glob(fmt.Sprintf("%v%v*.wav", *procDir, strippedFile))
