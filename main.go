@@ -152,8 +152,15 @@ func (r *Recorder) runRecord() error {
 	log.Printf("Error: %v -> %v", err, string(output))
 	r.cmd.Wait()
 
+	files, err := filepath.Glob(fmt.Sprintf("%v*.wav", num))
+	if err != nil {
+		return err
+	}
+	args := append([]string{}, files...)
+	args = append(args, *procDir)
+
 	// Move all the files over to the processing directory
-	moveCmd := exec.Command("mv", fmt.Sprintf("%v*.wav", num), *procDir)
+	moveCmd := exec.Command("mv", args...)
 	log.Printf("Copying files")
 	output, err = moveCmd.CombinedOutput()
 	log.Printf("Moved files %v -> %v", err, string(output))
@@ -175,20 +182,20 @@ func (s *Server) NewRecord(ctx context.Context, _ *pb.NewRecordRequest) (*pb.New
 
 func main() {
 	r := &Recorder{}
-	/*go func() {
+	go func() {
 		for {
 			err := r.runRecord()
 			log.Printf("Error recording: %v", err)
 			time.Sleep(time.Second * 5)
 		}
-	}()*/
+	}()
 
 	s := &Server{r: r}
 
-	s.processFiles(*procDir)
+	/*s.processFiles(*procDir)
 	if true {
 		return
-	}
+	}*/
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {
