@@ -182,17 +182,16 @@ func (s *Server) NewRecord(ctx context.Context, _ *pb.NewRecordRequest) (*pb.New
 
 func main() {
 	r := &Recorder{}
+	s := &Server{r: r}
+
 	go func() {
 		for {
 			err := r.runRecord()
 			log.Printf("Error recording: %v", err)
 			time.Sleep(time.Second * 5)
+			go func() { s.processFiles(*procDir) }()
 		}
 	}()
-
-	s := &Server{r: r}
-
-	s.processFiles(*procDir)
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {
