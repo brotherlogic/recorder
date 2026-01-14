@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,8 @@ import (
 	"github.com/brotherlogic/goserver/utils"
 	"google.golang.org/grpc"
 
+	pbgd "github.com/brotherlogic/godiscogs/proto"
+	pbrc "github.com/brotherlogic/recordcollection/proto"
 	pb "github.com/brotherlogic/recorder/proto"
 	pbrg "github.com/brotherlogic/recordgetter/proto"
 )
@@ -127,6 +130,32 @@ func (s *Server) processFiles(dir string) error {
 		rmCmd := exec.Command("rm", append([]string{}, files...)...)
 		out, err := rmCmd.CombinedOutput()
 		log.Printf("RM %v -> %v", err, string(out))
+
+		// Trigger out the push
+		id, err := strconv.ParseInt(selems[0], 10, 32)
+		log.Printf("Parsed to: %v, %v", id, err)
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		conn, err := utils.LFDialServer(ctx, "recordcollection")
+		log.Printf("Dialled: %v", err)
+		if err == nil {
+			rcclient := pbrc.NewRecordCollectionServiceClient(conn)
+			records, err := rcclient.QueryRecords(ctx, &pbrc.QueryRecordsRequest{
+				Query: &pbrc.QueryRecordsRequest_ReleaseId{
+					ReleaseId: int32(id),
+				},
+			})
+			log.Printf("Query: %v -> %v", records, err)
+			if err == nil {
+				for _, record := range records.GetInstanceIds() {
+					rcclient.UpdateRecord(ctx, &pbrc.UpdateRecordRequest{Reason: "digital rip", Update: &pbrc.Record{Release: &pbgd.Release{InstanceId: record}, Metadata: &pbrc.ReleaseMetadata{LastRipDate: time.Now().Unix()}}})
+				}
+			}
+		}
+
 	}
 
 	return nil
