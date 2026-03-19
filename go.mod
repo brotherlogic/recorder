@@ -7,7 +7,7 @@ require (
 	github.com/brotherlogic/goserver v0.0.0-20260125051706-82df7bec125f
 	github.com/brotherlogic/recordcollection v0.0.0-20260114215751-9dcd4d4ada8b
 	github.com/brotherlogic/recordgetter v0.0.0-20260125052128-c2f9222375f7
-	google.golang.org/grpc v1.78.0
+	google.golang.org/grpc v1.79.3
 	google.golang.org/protobuf v1.36.11
 )
 
