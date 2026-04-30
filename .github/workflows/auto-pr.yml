@@ -1,0 +1,25 @@
+name: Auto Create Pull Request
+on:
+  push:
+    branches-ignore:
+      - main
+
+jobs:
+  create-pr:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create Pull Request
+        run: |
+          # Use the GitHub CLI to create a PR
+          # --fill automatically uses the commit messages for the title and body
+          gh pr create --fill || echo "PR already exists or failed to create"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
