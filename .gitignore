@@ -1,7 +1,4 @@
-<<<<<<< HEAD
 *.wav
 recorder
 *.log
-=======
 .devcontainer/.env.auth
->>>>>>> origin/main
