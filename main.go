@@ -65,10 +65,44 @@ func getCurrentRecord() (int32, int32, error) {
 	return curr.GetRecord().GetRelease().GetId(), disk, nil
 }
 
+func (s *Server) cleanupRetainedFiles(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		log.Printf("Error reading retained dir: %v", err)
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			log.Printf("Error getting info for %v: %v", entry.Name(), err)
+			continue
+		}
+
+		if time.Since(info.ModTime()) > time.Hour*24 {
+			log.Printf("Deleting retained file: %v", entry.Name())
+			err := os.Remove(filepath.Join(dir, entry.Name()))
+			if err != nil {
+				log.Printf("Error deleting retained file: %v", err)
+			}
+		}
+	}
+}
+
 func (s *Server) processFiles(dir string) error {
 	// Lock to prevent stomping
 	s.r.pLock.Lock()
 	defer s.r.pLock.Unlock()
+
+	retainedDir := filepath.Join(dir, "retained")
+	err := os.MkdirAll(retainedDir, 0755)
+	if err != nil {
+		log.Printf("Error creating retained dir: %v", err)
+	}
+	s.cleanupRetainedFiles(retainedDir)
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -122,14 +156,22 @@ func (s *Server) processFiles(dir string) error {
 		log.Printf("Move output: %v -> %v", err, string(output))
 		// We expect errors here if the file is blank - ignore this
 
+		// Move the original file to retained directory
+		err = os.Rename(filepath.Join(dir, file.Name()), filepath.Join(retainedDir, file.Name()))
+		if err != nil {
+			log.Printf("Error moving file to retained: %v", err)
+		}
+
 		log.Printf("GLOB %v%v*.wav", *procDir, strippedFile)
 		files, err = filepath.Glob(fmt.Sprintf("%v%v*.wav", *procDir, strippedFile))
 		if err != nil {
 			return err
 		}
-		rmCmd := exec.Command("rm", append([]string{}, files...)...)
-		out, err := rmCmd.CombinedOutput()
-		log.Printf("RM %v -> %v", err, string(out))
+		if len(files) > 0 {
+			rmCmd := exec.Command("rm", append([]string{}, files...)...)
+			out, err := rmCmd.CombinedOutput()
+			log.Printf("RM %v -> %v", err, string(out))
+		}
 
 		// Trigger out the push
 		id, err := strconv.ParseInt(selems[0], 10, 32)
