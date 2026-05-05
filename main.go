@@ -92,6 +92,76 @@ func (s *Server) cleanupRetainedFiles(dir string) {
 	}
 }
 
+func (s *Server) splitWithSox(inputFile string, procDir string, strippedFile string, expectedTracks int) ([]string, error) {
+	durations := []string{"0.5", "0.8", "1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.8", "2.0", "2.5", "3.0", "4.0", "5.0"}
+	thresholds := []string{"0.05%", "0.1%", "0.15%", "0.2%", "0.25%", "0.3%", "0.4%", "0.5%", "0.75%", "1%", "1.5%", "2%", "5%", "10%", "15%"}
+
+	if expectedTracks <= 0 {
+		// Fallback to default
+		durations = []string{"0.5"}
+		thresholds = []string{"1%"}
+		expectedTracks = -1 // Ignore track count
+	}
+
+	for _, duration := range durations {
+		for _, threshold := range thresholds {
+			log.Printf("Trying sox parameters: duration=%v, threshold=%v", duration, threshold)
+			
+			tmpDir, err := os.MkdirTemp(procDir, "sox_processing")
+			if err != nil {
+				return nil, err
+			}
+			
+			outPattern := filepath.Join(tmpDir, strippedFile+"_track_.wav")
+			soxCmd := exec.Command("sox", inputFile, outPattern, "silence", "1", duration, threshold, "1", duration, threshold, ":", "newfile", ":", "restart")
+			output, err := soxCmd.CombinedOutput()
+			
+			if err != nil {
+				log.Printf("Sox failed for %v/%v: %v -> %v", duration, threshold, err, string(output))
+				os.RemoveAll(tmpDir)
+				continue
+			}
+
+			matches, err := filepath.Glob(filepath.Join(tmpDir, strippedFile+"_track_*.wav"))
+			if err != nil {
+				os.RemoveAll(tmpDir)
+				return nil, err
+			}
+			
+			var validTracks []string
+			for _, match := range matches {
+				info, err := os.Stat(match)
+				if err == nil && info.Size() > 10000 {
+					validTracks = append(validTracks, match)
+				} else if err == nil {
+					os.Remove(match) // Remove tiny files
+				}
+			}
+
+			if expectedTracks == -1 || len(validTracks) == expectedTracks {
+				log.Printf("Found working sox parameters: duration=%v, threshold=%v for %v tracks", duration, threshold, len(validTracks))
+				
+				// Move valid tracks to procDir
+				var finalFiles []string
+				for _, track := range validTracks {
+					finalFile := filepath.Join(procDir, filepath.Base(track))
+					err := os.Rename(track, finalFile)
+					if err != nil {
+						log.Printf("Error renaming track %v: %v", track, err)
+					}
+					finalFiles = append(finalFiles, finalFile)
+				}
+				os.RemoveAll(tmpDir)
+				return finalFiles, nil
+			}
+
+			os.RemoveAll(tmpDir)
+		}
+	}
+
+	return nil, fmt.Errorf("could not find sox parameters to get %v tracks", expectedTracks)
+}
+
 func (s *Server) processFiles(dir string) error {
 	// Lock to prevent stomping
 	s.r.pLock.Lock()
@@ -119,36 +189,56 @@ func (s *Server) processFiles(dir string) error {
 		strippedFile := file.Name()[:len(file.Name())-4]
 		elems := strings.Split(file.Name(), "-")
 		selems := strings.Split(elems[0], "_")
+		
+		id, err := strconv.ParseInt(selems[0], 10, 32)
+		log.Printf("Parsed to: %v, %v", id, err)
+		if err != nil {
+			return err
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		conn, err := utils.LFDialServer(ctx, "recordcollection")
+		var expectedTracks int
+		var rcclient pbrc.RecordCollectionServiceClient
+		if err == nil {
+			rcclient = pbrc.NewRecordCollectionServiceClient(conn)
+			res, err := rcclient.GetRecord(ctx, &pbrc.GetRecordRequest{ReleaseId: int32(id)})
+			if err == nil {
+				expectedTracks = len(res.GetRecord().GetRelease().GetTracklist())
+				log.Printf("Found expected tracks: %v", expectedTracks)
+			} else {
+				log.Printf("Error getting record for expected tracks: %v", err)
+			}
+		} else {
+			log.Printf("Dialled RC for expected tracks error: %v", err)
+		}
 
 		// Process the file
-		soxCmd := exec.Command("sox", fmt.Sprintf("%v%v", *procDir, file.Name()), fmt.Sprintf("%v%v_track_.wav", *procDir, strippedFile), "silence", "1", "0.5", "1%", "1", "0.5", "1%", ":", "newfile", ":", "restart")
-		log.Printf("Running sox command: %v", soxCmd.String())
-		output, err := soxCmd.CombinedOutput()
-		log.Printf("Sox output: %v -> %v", err, string(output))
+		inputFile := filepath.Join(dir, file.Name())
+		files, err := s.splitWithSox(inputFile, dir, strippedFile, expectedTracks)
 		if err != nil {
+			log.Printf("Error splitting with sox: %v", err)
+			cancel()
 			return err
 		}
 
 		// Convert to flac
-		files, err := filepath.Glob(fmt.Sprintf("%v%v_track_*.wav", *procDir, strippedFile))
-		if err != nil {
-			return err
-		}
-		args := []string{"--best", "--delete-input-file", "--output-prefix", *procDir}
+		args := []string{"--best", "--delete-input-file", "--output-prefix", dir + "/"}
 		args = append(args, files...)
 		flacCmd := exec.Command("flac", args...)
 		log.Printf("Running flac command: %v", flacCmd.String())
-		output, _ = flacCmd.CombinedOutput()
+		output, _ := flacCmd.CombinedOutput()
 		log.Printf("Flac output: %v -> %v", err, string(output))
 
 		//Move file into save dir - we don't care if this fails
 		err = os.Mkdir(fmt.Sprintf("%v/%v", *saveDir, selems[0]), 0755)
 		log.Printf("Error in mkdir: %v", err)
-		files, err = filepath.Glob(fmt.Sprintf("%v%v*track*.flac", *procDir, selems[0]))
+		flacFiles, err := filepath.Glob(fmt.Sprintf("%v/%v*track*.flac", dir, selems[0]))
 		if err != nil {
+			cancel()
 			return err
 		}
-		args = append([]string{}, files...)
+		args = append([]string{}, flacFiles...)
 		args = append(args, fmt.Sprintf("%v/%v/", *saveDir, selems[0]))
 		moveCmd := exec.Command("mv", args...)
 		log.Printf("Running move command: %v", moveCmd.String())
@@ -162,29 +252,19 @@ func (s *Server) processFiles(dir string) error {
 			log.Printf("Error moving file to retained: %v", err)
 		}
 
-		log.Printf("GLOB %v%v*.wav", *procDir, strippedFile)
-		files, err = filepath.Glob(fmt.Sprintf("%v%v*.wav", *procDir, strippedFile))
+		log.Printf("GLOB %v/%v*.wav", dir, strippedFile)
+		filesToRM, err := filepath.Glob(fmt.Sprintf("%v/%v*.wav", dir, strippedFile))
 		if err != nil {
+			cancel()
 			return err
 		}
-		if len(files) > 0 {
-			rmCmd := exec.Command("rm", append([]string{}, files...)...)
+		if len(filesToRM) > 0 {
+			rmCmd := exec.Command("rm", append([]string{}, filesToRM...)...)
 			out, err := rmCmd.CombinedOutput()
 			log.Printf("RM %v -> %v", err, string(out))
 		}
 
-		// Trigger out the push
-		id, err := strconv.ParseInt(selems[0], 10, 32)
-		log.Printf("Parsed to: %v, %v", id, err)
-		if err != nil {
-			return err
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		defer cancel()
-		conn, err := utils.LFDialServer(ctx, "recordcollection")
-		log.Printf("Dialled: %v", err)
-		if err == nil {
-			rcclient := pbrc.NewRecordCollectionServiceClient(conn)
+		if rcclient != nil {
 			records, err := rcclient.QueryRecords(ctx, &pbrc.QueryRecordsRequest{
 				Query: &pbrc.QueryRecordsRequest_ReleaseId{
 					ReleaseId: int32(id),
@@ -197,6 +277,7 @@ func (s *Server) processFiles(dir string) error {
 				}
 			}
 		}
+		cancel()
 
 	}
 
