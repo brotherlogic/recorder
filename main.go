@@ -93,73 +93,55 @@ func (s *Server) cleanupRetainedFiles(dir string) {
 }
 
 func (s *Server) splitWithSox(inputFile string, procDir string, strippedFile string, expectedTracks int) ([]string, error) {
-	durations := []string{"0.5", "0.8", "1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.8", "2.0", "2.5", "3.0", "4.0", "5.0"}
-	thresholds := []string{"0.05%", "0.1%", "0.15%", "0.2%", "0.25%", "0.3%", "0.4%", "0.5%", "0.75%", "1%", "1.5%", "2%", "5%", "10%", "15%"}
-
-	if expectedTracks <= 0 {
-		// Fallback to default
-		durations = []string{"0.5"}
-		thresholds = []string{"1%"}
-		expectedTracks = -1 // Ignore track count
+	duration, threshold, err := FindBestSoxParams(inputFile, expectedTracks)
+	if err != nil {
+		return nil, err
 	}
 
-	for _, duration := range durations {
-		for _, threshold := range thresholds {
-			log.Printf("Trying sox parameters: duration=%v, threshold=%v", duration, threshold)
+	log.Printf("Using sox parameters: duration=%v, threshold=%v for expected %v tracks", duration, threshold, expectedTracks)
 
-			tmpDir, err := os.MkdirTemp(procDir, "sox_processing")
-			if err != nil {
-				return nil, err
-			}
+	tmpDir, err := os.MkdirTemp(procDir, "sox_processing")
+	if err != nil {
+		return nil, err
+	}
 
-			outPattern := filepath.Join(tmpDir, strippedFile+"_track_.wav")
-			soxCmd := exec.Command("sox", inputFile, outPattern, "silence", "1", duration, threshold, "1", duration, threshold, ":", "newfile", ":", "restart")
-			output, err := soxCmd.CombinedOutput()
+	outPattern := filepath.Join(tmpDir, strippedFile+"_track_.wav")
+	soxCmd := exec.Command("sox", inputFile, outPattern, "silence", "1", duration, threshold, "1", duration, threshold, ":", "newfile", ":", "restart")
+	output, err := soxCmd.CombinedOutput()
 
-			if err != nil {
-				log.Printf("Sox failed for %v/%v: %v -> %v", duration, threshold, err, string(output))
-				os.RemoveAll(tmpDir)
-				continue
-			}
+	if err != nil {
+		log.Printf("Sox failed: %v -> %v", err, string(output))
+		os.RemoveAll(tmpDir)
+		return nil, err
+	}
 
-			matches, err := filepath.Glob(filepath.Join(tmpDir, strippedFile+"_track_*.wav"))
-			if err != nil {
-				os.RemoveAll(tmpDir)
-				return nil, err
-			}
+	matches, err := filepath.Glob(filepath.Join(tmpDir, strippedFile+"_track_*.wav"))
+	if err != nil {
+		os.RemoveAll(tmpDir)
+		return nil, err
+	}
 
-			var validTracks []string
-			for _, match := range matches {
-				info, err := os.Stat(match)
-				if err == nil && info.Size() > 10000 {
-					validTracks = append(validTracks, match)
-				} else if err == nil {
-					os.Remove(match) // Remove tiny files
-				}
-			}
-
-			if expectedTracks == -1 || len(validTracks) == expectedTracks {
-				log.Printf("Found working sox parameters: duration=%v, threshold=%v for %v tracks", duration, threshold, len(validTracks))
-
-				// Move valid tracks to procDir
-				var finalFiles []string
-				for _, track := range validTracks {
-					finalFile := filepath.Join(procDir, filepath.Base(track))
-					err := os.Rename(track, finalFile)
-					if err != nil {
-						log.Printf("Error renaming track %v: %v", track, err)
-					}
-					finalFiles = append(finalFiles, finalFile)
-				}
-				os.RemoveAll(tmpDir)
-				return finalFiles, nil
-			}
-
-			os.RemoveAll(tmpDir)
+	var validTracks []string
+	for _, match := range matches {
+		info, err := os.Stat(match)
+		if err == nil && info.Size() > 10000 {
+			validTracks = append(validTracks, match)
+		} else if err == nil {
+			os.Remove(match) // Remove tiny files
 		}
 	}
 
-	return nil, fmt.Errorf("could not find sox parameters to get %v tracks", expectedTracks)
+	var finalFiles []string
+	for _, track := range validTracks {
+		finalFile := filepath.Join(procDir, filepath.Base(track))
+		err := os.Rename(track, finalFile)
+		if err != nil {
+			log.Printf("Error renaming track %v: %v", track, err)
+		}
+		finalFiles = append(finalFiles, finalFile)
+	}
+	os.RemoveAll(tmpDir)
+	return finalFiles, nil
 }
 
 func getDiskFromPosition(pos string) int {
