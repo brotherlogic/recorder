@@ -106,16 +106,16 @@ func (s *Server) splitWithSox(inputFile string, procDir string, strippedFile str
 	for _, duration := range durations {
 		for _, threshold := range thresholds {
 			log.Printf("Trying sox parameters: duration=%v, threshold=%v", duration, threshold)
-			
+
 			tmpDir, err := os.MkdirTemp(procDir, "sox_processing")
 			if err != nil {
 				return nil, err
 			}
-			
+
 			outPattern := filepath.Join(tmpDir, strippedFile+"_track_.wav")
 			soxCmd := exec.Command("sox", inputFile, outPattern, "silence", "1", duration, threshold, "1", duration, threshold, ":", "newfile", ":", "restart")
 			output, err := soxCmd.CombinedOutput()
-			
+
 			if err != nil {
 				log.Printf("Sox failed for %v/%v: %v -> %v", duration, threshold, err, string(output))
 				os.RemoveAll(tmpDir)
@@ -127,7 +127,7 @@ func (s *Server) splitWithSox(inputFile string, procDir string, strippedFile str
 				os.RemoveAll(tmpDir)
 				return nil, err
 			}
-			
+
 			var validTracks []string
 			for _, match := range matches {
 				info, err := os.Stat(match)
@@ -140,7 +140,7 @@ func (s *Server) splitWithSox(inputFile string, procDir string, strippedFile str
 
 			if expectedTracks == -1 || len(validTracks) == expectedTracks {
 				log.Printf("Found working sox parameters: duration=%v, threshold=%v for %v tracks", duration, threshold, len(validTracks))
-				
+
 				// Move valid tracks to procDir
 				var finalFiles []string
 				for _, track := range validTracks {
@@ -160,6 +160,33 @@ func (s *Server) splitWithSox(inputFile string, procDir string, strippedFile str
 	}
 
 	return nil, fmt.Errorf("could not find sox parameters to get %v tracks", expectedTracks)
+}
+
+func getTrackOffset(release *pbgd.Release, disk int32) int {
+	if disk <= 1 {
+		return 0
+	}
+
+	offset := 0
+	for _, track := range release.GetTracklist() {
+		pos := track.GetPosition()
+		if strings.Contains(pos, "-") {
+			d, _ := strconv.Atoi(strings.Split(pos, "-")[0])
+			if int32(d) < disk {
+				offset++
+			}
+		} else if len(pos) > 0 {
+			// Handle A1, B1, C1 etc
+			char := pos[0]
+			if char >= 'A' && char <= 'Z' {
+				d := int((char-'A')/2) + 1
+				if int32(d) < disk {
+					offset++
+				}
+			}
+		}
+	}
+	return offset
 }
 
 func (s *Server) processFiles(dir string) error {
@@ -189,23 +216,32 @@ func (s *Server) processFiles(dir string) error {
 		strippedFile := file.Name()[:len(file.Name())-4]
 		elems := strings.Split(file.Name(), "-")
 		selems := strings.Split(elems[0], "_")
-		
-		id, err := strconv.ParseInt(selems[0], 10, 32)
-		log.Printf("Parsed to: %v, %v", id, err)
+
+		id64, err := strconv.ParseInt(selems[0], 10, 32)
+		log.Printf("Parsed to: %v, %v", id64, err)
 		if err != nil {
 			return err
+		}
+		id := int32(id64)
+
+		disk := int32(0)
+		if len(selems) > 1 {
+			d, _ := strconv.ParseInt(selems[1], 10, 32)
+			disk = int32(d)
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		conn, err := utils.LFDialServer(ctx, "recordcollection")
 		var expectedTracks int
+		var offset int
 		var rcclient pbrc.RecordCollectionServiceClient
 		if err == nil {
 			rcclient = pbrc.NewRecordCollectionServiceClient(conn)
-			res, err := rcclient.GetRecord(ctx, &pbrc.GetRecordRequest{ReleaseId: int32(id)})
+			res, err := rcclient.GetRecord(ctx, &pbrc.GetRecordRequest{ReleaseId: id})
 			if err == nil {
 				expectedTracks = len(res.GetRecord().GetRelease().GetTracklist())
 				log.Printf("Found expected tracks: %v", expectedTracks)
+				offset = getTrackOffset(res.GetRecord().GetRelease(), disk)
 			} else {
 				log.Printf("Error getting record for expected tracks: %v", err)
 			}
@@ -218,6 +254,29 @@ func (s *Server) processFiles(dir string) error {
 		files, err := s.splitWithSox(inputFile, dir, strippedFile, expectedTracks)
 		if err != nil {
 			log.Printf("Error splitting with sox: %v", err)
+			if conn != nil {
+				conn.Close()
+			}
+			cancel()
+			return err
+		}
+
+		// Rename the tracks with the offset
+		for i := len(files); i > 0; i-- {
+			oldName := filepath.Join(dir, fmt.Sprintf("%v_track_%03d.wav", strippedFile, i))
+			if _, err := os.Stat(oldName); os.IsNotExist(err) {
+				oldName = filepath.Join(dir, fmt.Sprintf("%v_track_%d.wav", strippedFile, i))
+			}
+			newName := filepath.Join(dir, fmt.Sprintf("%v_track_%03d.wav", strippedFile, i+offset))
+			os.Rename(oldName, newName)
+		}
+
+		// Re-glob to get updated names
+		files, err = filepath.Glob(filepath.Join(dir, fmt.Sprintf("%v_track_*.wav", strippedFile)))
+		if err != nil {
+			if conn != nil {
+				conn.Close()
+			}
 			cancel()
 			return err
 		}
@@ -233,8 +292,11 @@ func (s *Server) processFiles(dir string) error {
 		//Move file into save dir - we don't care if this fails
 		err = os.Mkdir(fmt.Sprintf("%v/%v", *saveDir, selems[0]), 0755)
 		log.Printf("Error in mkdir: %v", err)
-		flacFiles, err := filepath.Glob(fmt.Sprintf("%v/%v*track*.flac", dir, selems[0]))
+		flacFiles, err := filepath.Glob(filepath.Join(dir, fmt.Sprintf("%v*track*.flac", selems[0])))
 		if err != nil {
+			if conn != nil {
+				conn.Close()
+			}
 			cancel()
 			return err
 		}
@@ -244,7 +306,6 @@ func (s *Server) processFiles(dir string) error {
 		log.Printf("Running move command: %v", moveCmd.String())
 		output, err = moveCmd.CombinedOutput()
 		log.Printf("Move output: %v -> %v", err, string(output))
-		// We expect errors here if the file is blank - ignore this
 
 		// Move the original file to retained directory
 		err = os.Rename(filepath.Join(dir, file.Name()), filepath.Join(retainedDir, file.Name()))
@@ -253,8 +314,11 @@ func (s *Server) processFiles(dir string) error {
 		}
 
 		log.Printf("GLOB %v/%v*.wav", dir, strippedFile)
-		filesToRM, err := filepath.Glob(fmt.Sprintf("%v/%v*.wav", dir, strippedFile))
+		filesToRM, err := filepath.Glob(filepath.Join(dir, fmt.Sprintf("%v*.wav", strippedFile)))
 		if err != nil {
+			if conn != nil {
+				conn.Close()
+			}
 			cancel()
 			return err
 		}
@@ -267,7 +331,7 @@ func (s *Server) processFiles(dir string) error {
 		if rcclient != nil {
 			records, err := rcclient.QueryRecords(ctx, &pbrc.QueryRecordsRequest{
 				Query: &pbrc.QueryRecordsRequest_ReleaseId{
-					ReleaseId: int32(id),
+					ReleaseId: id,
 				},
 			})
 			log.Printf("Query: %v -> %v", records, err)
@@ -276,9 +340,9 @@ func (s *Server) processFiles(dir string) error {
 					rcclient.UpdateRecord(ctx, &pbrc.UpdateRecordRequest{Reason: "digital rip", Update: &pbrc.Record{Release: &pbgd.Release{InstanceId: record}, Metadata: &pbrc.ReleaseMetadata{LastRipDate: time.Now().Unix()}}})
 				}
 			}
+			conn.Close()
 		}
 		cancel()
-
 	}
 
 	return nil
