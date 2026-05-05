@@ -24,9 +24,10 @@ import (
 )
 
 var (
-	port    = flag.Int("port", 8080, "Port to server from")
-	procDir = flag.String("processing_dir", "/home/simon/processing/", "Directory to processing recordings")
-	saveDir = flag.String("save_dir", "/home/simon/music/flacs/", "Directory to save recordings")
+	port        = flag.Int("port", 8080, "Port to server from")
+	procDir     = flag.String("processing_dir", "/home/simon/processing/", "Directory to processing recordings")
+	saveDir     = flag.String("save_dir", "/home/simon/music/flacs/", "Directory to save recordings")
+	processOnly = flag.Bool("process_only", false, "Only process files, do not record")
 )
 
 type Recorder struct {
@@ -435,15 +436,24 @@ func (s *Server) NewRecord(ctx context.Context, _ *pb.NewRecordRequest) (*pb.New
 }
 
 func main() {
+	flag.Parse()
 	r := &Recorder{}
 	s := &Server{r: r}
 
 	go func() {
 		for {
-			err := r.runRecord()
-			log.Printf("Error recording: %v", err)
-			time.Sleep(time.Second * 5)
-			go func() { s.processFiles(*procDir) }()
+			if *processOnly {
+				err := s.processFiles(*procDir)
+				if err != nil {
+					log.Printf("Error processing files: %v", err)
+				}
+				time.Sleep(time.Second * 5)
+			} else {
+				err := r.runRecord()
+				log.Printf("Error recording: %v", err)
+				time.Sleep(time.Second * 5)
+				go func() { s.processFiles(*procDir) }()
+			}
 		}
 	}()
 
