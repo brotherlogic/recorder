@@ -281,6 +281,10 @@ func (s *Server) processFiles(dir string) error {
 
 		// Process the file
 		inputFile := filepath.Join(dir, file.Name())
+		if expectedTracks <= 0 {
+			log.Printf("Expected tracks is %v, defaulting to 2", expectedTracks)
+			expectedTracks = 2
+		}
 		files, err := s.splitWithSox(inputFile, dir, strippedFile, expectedTracks)
 		if err != nil {
 			log.Printf("Error splitting with sox: %v", err)
