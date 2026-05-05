@@ -162,6 +162,34 @@ func (s *Server) splitWithSox(inputFile string, procDir string, strippedFile str
 	return nil, fmt.Errorf("could not find sox parameters to get %v tracks", expectedTracks)
 }
 
+func getDiskFromPosition(pos string) int {
+	if len(pos) == 0 {
+		return 0
+	}
+
+	// Find the letter part
+	letters := ""
+	for i := 0; i < len(pos); i++ {
+		if pos[i] >= 'A' && pos[i] <= 'Z' {
+			letters += string(pos[i])
+		} else {
+			break
+		}
+	}
+
+	if len(letters) == 0 {
+		return 0
+	}
+
+	// Convert letters to number (A=1, B=2, AA=27, etc)
+	val := 0
+	for i := 0; i < len(letters); i++ {
+		val = val*26 + int(letters[i]-'A'+1)
+	}
+
+	return (val-1)/2 + 1
+}
+
 func getTrackOffset(release *pbgd.Release, disk int32) int {
 	if disk <= 1 {
 		return 0
@@ -176,17 +204,36 @@ func getTrackOffset(release *pbgd.Release, disk int32) int {
 				offset++
 			}
 		} else if len(pos) > 0 {
-			// Handle A1, B1, C1 etc
-			char := pos[0]
-			if char >= 'A' && char <= 'Z' {
-				d := int((char-'A')/2) + 1
-				if int32(d) < disk {
-					offset++
-				}
+			d := getDiskFromPosition(pos)
+			if int32(d) < disk {
+				offset++
 			}
 		}
 	}
 	return offset
+}
+
+func getExpectedTracks(release *pbgd.Release, disk int32) int {
+	if release.GetFormatQuantity() <= 1 {
+		return len(release.GetTracklist())
+	}
+
+	count := 0
+	for _, track := range release.GetTracklist() {
+		pos := track.GetPosition()
+		if strings.Contains(pos, "-") {
+			d, _ := strconv.Atoi(strings.Split(pos, "-")[0])
+			if int32(d) == disk {
+				count++
+			}
+		} else if len(pos) > 0 {
+			d := getDiskFromPosition(pos)
+			if int32(d) == disk {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 func (s *Server) processFiles(dir string) error {
@@ -239,7 +286,7 @@ func (s *Server) processFiles(dir string) error {
 			rcclient = pbrc.NewRecordCollectionServiceClient(conn)
 			res, err := rcclient.GetRecord(ctx, &pbrc.GetRecordRequest{ReleaseId: id})
 			if err == nil {
-				expectedTracks = len(res.GetRecord().GetRelease().GetTracklist())
+				expectedTracks = getExpectedTracks(res.GetRecord().GetRelease(), disk)
 				log.Printf("Found expected tracks: %v", expectedTracks)
 				offset = getTrackOffset(res.GetRecord().GetRelease(), disk)
 			} else {

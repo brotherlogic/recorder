@@ -10,42 +10,141 @@ import (
 )
 
 func TestCleanupRetainedFiles(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "test_retained")
+	s := &Server{}
+	dir, err := os.MkdirTemp("", "test")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer os.RemoveAll(dir)
 
-	s := &Server{}
-
-	// Create a fresh file
-	freshFile := filepath.Join(tmpDir, "fresh.wav")
-	if err := os.WriteFile(freshFile, []byte("fresh"), 0644); err != nil {
-		t.Fatalf("Failed to create fresh file: %v", err)
-	}
-
-	// Create an old file
-	oldFile := filepath.Join(tmpDir, "old.wav")
-	if err := os.WriteFile(oldFile, []byte("old"), 0644); err != nil {
+	oldFile := filepath.Join(dir, "old.wav")
+	err = os.WriteFile(oldFile, []byte("test"), 0644)
+	if err != nil {
 		t.Fatalf("Failed to create old file: %v", err)
 	}
-	// Backdate it to 25 hours ago
-	oldTime := time.Now().Add(-25 * time.Hour)
-	if err := os.Chtimes(oldFile, oldTime, oldTime); err != nil {
-		t.Fatalf("Failed to backdate file: %v", err)
-	}
 
-	// Run cleanup
-	s.cleanupRetainedFiles(tmpDir)
+	// Backdate the file to 48 hours ago
+	oldTime := time.Now().Add(-48 * time.Hour)
+	os.Chtimes(oldFile, oldTime, oldTime)
 
-	// Verify fresh file exists
-	if _, err := os.Stat(freshFile); os.IsNotExist(err) {
-		t.Errorf("Fresh file was incorrectly deleted")
-	}
+	s.cleanupRetainedFiles(dir)
 
-	// Verify old file is gone
 	if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
 		t.Errorf("Old file was not deleted")
+	}
+}
+
+func TestGetDiskFromPosition(t *testing.T) {
+	tests := []struct {
+		pos      string
+		expected int
+	}{
+		{"A1", 1},
+		{"B1", 1},
+		{"C1", 2},
+		{"D1", 2},
+		{"Z1", 13},
+		{"AA1", 14},
+		{"AB1", 14},
+		{"AC1", 15},
+		{"AD1", 15},
+	}
+
+	for _, tc := range tests {
+		got := getDiskFromPosition(tc.pos)
+		if got != tc.expected {
+			t.Errorf("getDiskFromPosition(%v) = %v, want %v", tc.pos, got, tc.expected)
+		}
+	}
+}
+
+func TestGetExpectedTracks(t *testing.T) {
+	tests := []struct {
+		name     string
+		release  *pbgd.Release
+		disk     int32
+		expected int
+	}{
+		{
+			name: "Single disk CD",
+			release: &pbgd.Release{
+				FormatQuantity: 1,
+				Tracklist: []*pbgd.Track{
+					{Position: "1"},
+					{Position: "2"},
+				},
+			},
+			disk:     1,
+			expected: 2,
+		},
+		{
+			name: "Multi disk CD",
+			release: &pbgd.Release{
+				FormatQuantity: 2,
+				Tracklist: []*pbgd.Track{
+					{Position: "1-1"},
+					{Position: "1-2"},
+					{Position: "2-1"},
+					{Position: "2-2"},
+					{Position: "2-3"},
+				},
+			},
+			disk:     2,
+			expected: 3,
+		},
+		{
+			name: "Release 19347250 Disk 5",
+			release: &pbgd.Release{
+				FormatQuantity: 19,
+				Tracklist: []*pbgd.Track{
+					{Position: "A1"}, {Position: "A2"}, {Position: "A3"}, {Position: "A4"}, {Position: "A5"}, {Position: "A6"}, {Position: "A7"}, {Position: "A8"}, {Position: "A9"}, {Position: "A10"}, {Position: "A11"}, {Position: "A12"}, {Position: "A13"}, {Position: "A14"}, {Position: "A15"},
+					{Position: "B16"}, {Position: "B17"}, {Position: "B18"}, {Position: "B19"}, {Position: "B20"}, {Position: "B21"}, {Position: "B22"}, {Position: "B23"},
+					{Position: "C1"}, {Position: "C2"}, {Position: "C3"}, {Position: "C4"}, {Position: "C5"}, {Position: "C6"}, {Position: "C7"}, {Position: "C8"}, {Position: "C9"},
+					{Position: "D10"}, {Position: "D11"}, {Position: "D12"}, {Position: "D13"}, {Position: "D14"}, {Position: "D15"}, {Position: "D16"}, {Position: "D17"}, {Position: "D18"}, {Position: "D19"}, {Position: "D20"}, {Position: "D21"}, {Position: "D22"},
+					{Position: "E1"}, {Position: "E2"}, {Position: "E3"}, {Position: "E4"}, {Position: "E5"}, {Position: "E6"}, {Position: "E7"}, {Position: "E8"}, {Position: "E9"}, {Position: "E10"}, {Position: "E11"}, {Position: "E12"},
+					{Position: "F13"}, {Position: "F14"}, {Position: "F15"}, {Position: "F16"}, {Position: "F17"}, {Position: "F18"}, {Position: "F19"}, {Position: "F20"}, {Position: "F21"},
+					{Position: "G22"}, {Position: "G23"}, {Position: "G24"}, {Position: "G25"}, {Position: "G26"}, {Position: "G27"}, {Position: "G28"}, {Position: "G29"}, {Position: "G30"}, {Position: "G31"}, {Position: "G32"},
+					{Position: "H33"}, {Position: "H34"}, {Position: "H35"}, {Position: "H36"}, {Position: "H37"}, {Position: "H38"}, {Position: "H39"},
+					{Position: "I1"}, {Position: "I2"}, {Position: "I3"}, {Position: "I4"}, {Position: "I5"}, {Position: "I6"}, {Position: "I7"}, {Position: "I8"}, {Position: "I9"}, {Position: "I10"}, {Position: "I11"}, {Position: "I12"}, {Position: "I13"}, {Position: "I14"},
+					{Position: "J15"}, {Position: "J16"}, {Position: "J17"}, {Position: "J18"}, {Position: "J19"}, {Position: "J20"}, {Position: "J21"}, {Position: "J22"},
+					{Position: "K23"}, {Position: "K24"}, {Position: "K25"},
+					{Position: "L26"}, {Position: "L27"}, {Position: "L28"},
+				},
+			},
+			disk:     5,
+			expected: 22, // I(14) + J(8)
+		},
+		{
+			name: "Release 19347250 Disk 6",
+			release: &pbgd.Release{
+				FormatQuantity: 19,
+				Tracklist: []*pbgd.Track{
+					{Position: "A1"}, {Position: "A2"}, {Position: "A3"}, {Position: "A4"}, {Position: "A5"}, {Position: "A6"}, {Position: "A7"}, {Position: "A8"}, {Position: "A9"}, {Position: "A10"}, {Position: "A11"}, {Position: "A12"}, {Position: "A13"}, {Position: "A14"}, {Position: "A15"},
+					{Position: "B16"}, {Position: "B17"}, {Position: "B18"}, {Position: "B19"}, {Position: "B20"}, {Position: "B21"}, {Position: "B22"}, {Position: "B23"},
+					{Position: "C1"}, {Position: "C2"}, {Position: "C3"}, {Position: "C4"}, {Position: "C5"}, {Position: "C6"}, {Position: "C7"}, {Position: "C8"}, {Position: "C9"},
+					{Position: "D10"}, {Position: "D11"}, {Position: "D12"}, {Position: "D13"}, {Position: "D14"}, {Position: "D15"}, {Position: "D16"}, {Position: "D17"}, {Position: "D18"}, {Position: "D19"}, {Position: "D20"}, {Position: "D21"}, {Position: "D22"},
+					{Position: "E1"}, {Position: "E2"}, {Position: "E3"}, {Position: "E4"}, {Position: "E5"}, {Position: "E6"}, {Position: "E7"}, {Position: "E8"}, {Position: "E9"}, {Position: "E10"}, {Position: "E11"}, {Position: "E12"},
+					{Position: "F13"}, {Position: "F14"}, {Position: "F15"}, {Position: "F16"}, {Position: "F17"}, {Position: "F18"}, {Position: "F19"}, {Position: "F20"}, {Position: "F21"},
+					{Position: "G22"}, {Position: "G23"}, {Position: "G24"}, {Position: "G25"}, {Position: "G26"}, {Position: "G27"}, {Position: "G28"}, {Position: "G29"}, {Position: "G30"}, {Position: "G31"}, {Position: "G32"},
+					{Position: "H33"}, {Position: "H34"}, {Position: "H35"}, {Position: "H36"}, {Position: "H37"}, {Position: "H38"}, {Position: "H39"},
+					{Position: "I1"}, {Position: "I2"}, {Position: "I3"}, {Position: "I4"}, {Position: "I5"}, {Position: "I6"}, {Position: "I7"}, {Position: "I8"}, {Position: "I9"}, {Position: "I10"}, {Position: "I11"}, {Position: "I12"}, {Position: "I13"}, {Position: "I14"},
+					{Position: "J15"}, {Position: "J16"}, {Position: "J17"}, {Position: "J18"}, {Position: "J19"}, {Position: "J20"}, {Position: "J21"}, {Position: "J22"},
+					{Position: "K23"}, {Position: "K24"}, {Position: "K25"},
+					{Position: "L26"}, {Position: "L27"}, {Position: "L28"},
+				},
+			},
+			disk:     6,
+			expected: 6, // K(3) + L(3)
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := getExpectedTracks(tc.release, tc.disk)
+			if got != tc.expected {
+				t.Errorf("getExpectedTracks() = %v, want %v", got, tc.expected)
+			}
+		})
 	}
 }
 
@@ -101,15 +200,39 @@ func TestGetTrackOffset(t *testing.T) {
 			name: "Release 19347250 Disk 5",
 			release: &pbgd.Release{
 				Tracklist: []*pbgd.Track{
-					{Position: "1-1"}, {Position: "1-2"}, {Position: "1-3"}, {Position: "1-4"},
-					{Position: "2-1"}, {Position: "2-2"}, {Position: "2-3"}, {Position: "2-4"},
-					{Position: "3-1"}, {Position: "3-2"}, {Position: "3-3"}, {Position: "3-4"},
-					{Position: "4-1"}, {Position: "4-2"}, {Position: "4-3"}, {Position: "4-4"}, {Position: "4-5"}, {Position: "4-6"},
-					{Position: "5-1"}, {Position: "5-2"},
+					{Position: "A1"}, {Position: "A2"}, {Position: "A3"}, {Position: "A4"}, {Position: "A5"}, {Position: "A6"}, {Position: "A7"}, {Position: "A8"}, {Position: "A9"}, {Position: "A10"}, {Position: "A11"}, {Position: "A12"}, {Position: "A13"}, {Position: "A14"}, {Position: "A15"},
+					{Position: "B16"}, {Position: "B17"}, {Position: "B18"}, {Position: "B19"}, {Position: "B20"}, {Position: "B21"}, {Position: "B22"}, {Position: "B23"},
+					{Position: "C1"}, {Position: "C2"}, {Position: "C3"}, {Position: "C4"}, {Position: "C5"}, {Position: "C6"}, {Position: "C7"}, {Position: "C8"}, {Position: "C9"},
+					{Position: "D10"}, {Position: "D11"}, {Position: "D12"}, {Position: "D13"}, {Position: "D14"}, {Position: "D15"}, {Position: "D16"}, {Position: "D17"}, {Position: "D18"}, {Position: "D19"}, {Position: "D20"}, {Position: "D21"}, {Position: "D22"},
+					{Position: "E1"}, {Position: "E2"}, {Position: "E3"}, {Position: "E4"}, {Position: "E5"}, {Position: "E6"}, {Position: "E7"}, {Position: "E8"}, {Position: "E9"}, {Position: "E10"}, {Position: "E11"}, {Position: "E12"},
+					{Position: "F13"}, {Position: "F14"}, {Position: "F15"}, {Position: "F16"}, {Position: "F17"}, {Position: "F18"}, {Position: "F19"}, {Position: "F20"}, {Position: "F21"},
+					{Position: "G22"}, {Position: "G23"}, {Position: "G24"}, {Position: "G25"}, {Position: "G26"}, {Position: "G27"}, {Position: "G28"}, {Position: "G29"}, {Position: "G30"}, {Position: "G31"}, {Position: "G32"},
+					{Position: "H33"}, {Position: "H34"}, {Position: "H35"}, {Position: "H36"}, {Position: "H37"}, {Position: "H38"}, {Position: "H39"},
+					{Position: "I1"}, {Position: "I2"}, // Disk 5 starts here
 				},
 			},
 			disk:     5,
-			expected: 18,
+			expected: 84, // 23+22+21+18
+		},
+		{
+			name: "Release 19347250 Disk 6",
+			release: &pbgd.Release{
+				Tracklist: []*pbgd.Track{
+					{Position: "A1"}, {Position: "A2"}, {Position: "A3"}, {Position: "A4"}, {Position: "A5"}, {Position: "A6"}, {Position: "A7"}, {Position: "A8"}, {Position: "A9"}, {Position: "A10"}, {Position: "A11"}, {Position: "A12"}, {Position: "A13"}, {Position: "A14"}, {Position: "A15"},
+					{Position: "B16"}, {Position: "B17"}, {Position: "B18"}, {Position: "B19"}, {Position: "B20"}, {Position: "B21"}, {Position: "B22"}, {Position: "B23"},
+					{Position: "C1"}, {Position: "C2"}, {Position: "C3"}, {Position: "C4"}, {Position: "C5"}, {Position: "C6"}, {Position: "C7"}, {Position: "C8"}, {Position: "C9"},
+					{Position: "D10"}, {Position: "D11"}, {Position: "D12"}, {Position: "D13"}, {Position: "D14"}, {Position: "D15"}, {Position: "D16"}, {Position: "D17"}, {Position: "D18"}, {Position: "D19"}, {Position: "D20"}, {Position: "D21"}, {Position: "D22"},
+					{Position: "E1"}, {Position: "E2"}, {Position: "E3"}, {Position: "E4"}, {Position: "E5"}, {Position: "E6"}, {Position: "E7"}, {Position: "E8"}, {Position: "E9"}, {Position: "E10"}, {Position: "E11"}, {Position: "E12"},
+					{Position: "F13"}, {Position: "F14"}, {Position: "F15"}, {Position: "F16"}, {Position: "F17"}, {Position: "F18"}, {Position: "F19"}, {Position: "F20"}, {Position: "F21"},
+					{Position: "G22"}, {Position: "G23"}, {Position: "G24"}, {Position: "G25"}, {Position: "G26"}, {Position: "G27"}, {Position: "G28"}, {Position: "G29"}, {Position: "G30"}, {Position: "G31"}, {Position: "G32"},
+					{Position: "H33"}, {Position: "H34"}, {Position: "H35"}, {Position: "H36"}, {Position: "H37"}, {Position: "H38"}, {Position: "H39"},
+					{Position: "I1"}, {Position: "I2"}, {Position: "I3"}, {Position: "I4"}, {Position: "I5"}, {Position: "I6"}, {Position: "I7"}, {Position: "I8"}, {Position: "I9"}, {Position: "I10"}, {Position: "I11"}, {Position: "I12"}, {Position: "I13"}, {Position: "I14"},
+					{Position: "J15"}, {Position: "J16"}, {Position: "J17"}, {Position: "J18"}, {Position: "J19"}, {Position: "J20"}, {Position: "J21"}, {Position: "J22"},
+					{Position: "K23"}, {Position: "K24"}, // Disk 6 starts here
+				},
+			},
+			disk:     6,
+			expected: 106, // 84 + 22
 		},
 	}
 

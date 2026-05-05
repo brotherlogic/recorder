@@ -1,0 +1,1 @@
+rsync -avz --progress simon@recorder:testing/* ./testing
