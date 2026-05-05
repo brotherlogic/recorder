@@ -290,14 +290,23 @@ func (s *Server) processFiles(dir string) error {
 			return err
 		}
 
-		// Rename the tracks with the offset
-		for i := len(files); i > 0; i-- {
-			oldName := filepath.Join(dir, fmt.Sprintf("%v_track_%03d.wav", strippedFile, i))
-			if _, err := os.Stat(oldName); os.IsNotExist(err) {
-				oldName = filepath.Join(dir, fmt.Sprintf("%v_track_%d.wav", strippedFile, i))
+		// Rename the tracks with the offset sequentially, using a .tmp step to avoid collisions
+		var tmpNames []string
+		for _, f := range files {
+			tmpName := f + ".tmp"
+			err := os.Rename(f, tmpName)
+			if err != nil {
+				log.Printf("Error renaming to tmp: %v", err)
 			}
-			newName := filepath.Join(dir, fmt.Sprintf("%v_track_%03d.wav", strippedFile, i+offset))
-			os.Rename(oldName, newName)
+			tmpNames = append(tmpNames, tmpName)
+		}
+
+		for i, tmpName := range tmpNames {
+			newName := filepath.Join(dir, fmt.Sprintf("%v_track_%03d.wav", strippedFile, i+1+offset))
+			err := os.Rename(tmpName, newName)
+			if err != nil {
+				log.Printf("Error renaming from tmp to final: %v", err)
+			}
 		}
 
 		// Re-glob to get updated names
