@@ -1,8 +1,12 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -245,3 +249,211 @@ func TestGetTrackOffset(t *testing.T) {
 		})
 	}
 }
+
+func TestDownloadImageSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("fake-image-data"))
+	}))
+	defer server.Close()
+
+	tmpFile, err := downloadImage(server.URL)
+	if err != nil {
+		t.Fatalf("downloadImage failed: %v", err)
+	}
+	defer os.Remove(tmpFile)
+
+	content, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to read downloaded file: %v", err)
+	}
+
+	if string(content) != "fake-image-data" {
+		t.Errorf("expected content 'fake-image-data', got %v", string(content))
+	}
+}
+
+func TestDownloadImageRetry(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("retried-image-data"))
+	}))
+	defer server.Close()
+
+	tmpFile, err := downloadImage(server.URL)
+	if err != nil {
+		t.Fatalf("downloadImage failed: %v", err)
+	}
+	defer os.Remove(tmpFile)
+
+	if attempts != 3 {
+		t.Errorf("expected 3 attempts, got %v", attempts)
+	}
+
+	content, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to read downloaded file: %v", err)
+	}
+
+	if string(content) != "retried-image-data" {
+		t.Errorf("expected content 'retried-image-data', got %v", string(content))
+	}
+}
+
+func TestDownloadImageFail(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	_, err := downloadImage(server.URL)
+	if err == nil {
+		t.Errorf("expected error from downloadImage, got nil")
+	}
+
+	if attempts != 3 {
+		t.Errorf("expected 3 attempts, got %v", attempts)
+	}
+}
+
+func TestConvertToFlac(t *testing.T) {
+	s := &Server{}
+	dir, err := os.MkdirTemp("", "flac_test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	// Create a dummy wav file
+	wavFile := filepath.Join(dir, "track1.wav")
+	cmd := exec.Command("sox", "-n", "-r", "44100", "-c", "2", wavFile, "trim", "0.0", "0.1")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to create dummy wav: %v", err)
+	}
+
+	release := &pbgd.Release{
+		Artists: []*pbgd.Artist{{Name: "Release Artist"}},
+		Tracklist: []*pbgd.Track{
+			{Title: "Track 1"},
+		},
+	}
+
+	err = s.convertToFlac([]string{wavFile}, 1, release, 0, dir)
+	if err != nil {
+		t.Fatalf("convertToFlac failed: %v", err)
+	}
+
+	flacFile := filepath.Join(dir, "track1.flac")
+	if _, err := os.Stat(flacFile); os.IsNotExist(err) {
+		t.Fatalf("flac file was not created")
+	}
+
+	// Verify tags using metaflac
+	tagsCmd := exec.Command("metaflac", "--show-tag=TITLE", "--show-tag=ARTIST", flacFile)
+	output, err := tagsCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("metaflac failed: %v -> %v", err, string(output))
+	}
+
+	outStr := string(output)
+	if !strings.Contains(outStr, "TITLE=Track 1") {
+		t.Errorf("expected TITLE=Track 1 in output, got %v", outStr)
+	}
+	if !strings.Contains(outStr, "ARTIST=Release Artist") {
+		t.Errorf("expected ARTIST=Release Artist in output, got %v", outStr)
+	}
+}
+
+func TestConvertToFlacImageFail(t *testing.T) {
+	s := &Server{}
+	dir, err := os.MkdirTemp("", "flac_test_imgfail")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	wavFile := filepath.Join(dir, "track1.wav")
+	cmd := exec.Command("sox", "-n", "-r", "44100", "-c", "2", wavFile, "trim", "0.0", "0.1")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to create dummy wav: %v", err)
+	}
+
+	release := &pbgd.Release{
+		Artists: []*pbgd.Artist{{Name: "Release Artist"}},
+		Images:  []*pbgd.Image{{Uri: "http://example.com/bad-image.jpg"}},
+		Tracklist: []*pbgd.Track{
+			{Title: "Track 1"},
+		},
+	}
+
+	// Mock image server that fails
+	imgServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer imgServer.Close()
+	release.Images[0].Uri = imgServer.URL
+
+	err = s.convertToFlac([]string{wavFile}, 1, release, 0, dir)
+	if err != nil {
+		t.Fatalf("convertToFlac failed even when image download failed: %v", err)
+	}
+
+	flacFile := filepath.Join(dir, "track1.flac")
+	if _, err := os.Stat(flacFile); os.IsNotExist(err) {
+		t.Fatalf("flac file was not created")
+	}
+
+	// Verify tags still applied
+	tagsCmd := exec.Command("metaflac", "--show-tag=TITLE", flacFile)
+	output, _ := tagsCmd.CombinedOutput()
+	if !strings.Contains(string(output), "TITLE=Track 1") {
+		t.Errorf("expected TITLE tag to be applied even if image fails")
+	}
+}
+
+
+func TestConvertToFlacNoMatch(t *testing.T) {
+	s := &Server{}
+	dir, err := os.MkdirTemp("", "flac_test_nomatch")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	wavFile := filepath.Join(dir, "track1.wav")
+	cmd := exec.Command("sox", "-n", "-r", "44100", "-c", "2", wavFile, "trim", "0.0", "0.1")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to create dummy wav: %v", err)
+	}
+
+	release := &pbgd.Release{
+		Tracklist: []*pbgd.Track{{Title: "Track 1"}},
+	}
+
+	// Case where len(splitFiles) != expectedTracks
+	err = s.convertToFlac([]string{wavFile}, 2, release, 0, dir)
+	if err != nil {
+		t.Fatalf("convertToFlac failed: %v", err)
+	}
+
+	flacFile := filepath.Join(dir, "track1.flac")
+	if _, err := os.Stat(flacFile); os.IsNotExist(err) {
+		t.Fatalf("flac file was not created")
+	}
+
+	tagsCmd := exec.Command("metaflac", "--show-tag=TITLE", flacFile)
+	output, _ := tagsCmd.CombinedOutput()
+	if strings.Contains(string(output), "TITLE=Track 1") {
+		t.Errorf("did not expect TITLE tag when track counts do not match")
+	}
+}
+
+

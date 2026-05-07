@@ -4,8 +4,10 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -66,6 +68,38 @@ func getCurrentRecord() (int32, int32, error) {
 	}
 
 	return curr.GetRecord().GetRelease().GetId(), disk, nil
+}
+
+func downloadImage(url string) (string, error) {
+	var lastErr error
+	for i := 0; i < 3; i++ {
+		resp, err := http.Get(url)
+		if err == nil {
+			if resp.StatusCode != http.StatusOK {
+				resp.Body.Close()
+				lastErr = fmt.Errorf("bad status: %s", resp.Status)
+				time.Sleep(time.Second * time.Duration(i+1))
+				continue
+			}
+			defer resp.Body.Close()
+
+			tmpFile, err := os.CreateTemp("", "recorder-art-*.jpg")
+			if err != nil {
+				return "", err
+			}
+			defer tmpFile.Close()
+
+			_, err = io.Copy(tmpFile, resp.Body)
+			if err != nil {
+				os.Remove(tmpFile.Name())
+				return "", err
+			}
+			return tmpFile.Name(), nil
+		}
+		lastErr = err
+		time.Sleep(time.Second * time.Duration(i+1))
+	}
+	return "", fmt.Errorf("failed after 3 retries: %v", lastErr)
 }
 
 func (s *Server) cleanupRetainedFiles(dir string) {
@@ -221,6 +255,57 @@ func getExpectedTracks(release *pbgd.Release, disk int32) int {
 	return count
 }
 
+func (s *Server) convertToFlac(splitFiles []string, expectedTracks int, release *pbgd.Release, offset int, dir string) error {
+	if len(splitFiles) == expectedTracks && release != nil {
+		log.Printf("Full match found, tagging individually")
+		var artFile string
+		if len(release.GetImages()) > 0 {
+			var err error
+			artFile, err = downloadImage(release.GetImages()[0].GetUri())
+			if err != nil {
+				log.Printf("Error downloading image: %v", err)
+			}
+		}
+
+		for i, file := range splitFiles {
+			track := release.GetTracklist()[offset+i]
+			trackTitle := track.GetTitle()
+			trackArtists := release.GetArtists()
+
+			var artists []string
+			for _, a := range trackArtists {
+				artists = append(artists, a.GetName())
+			}
+			artistStr := strings.Join(artists, ", ")
+
+			args := []string{"--best", "--delete-input-file", "--output-prefix", dir + "/"}
+			args = append(args, fmt.Sprintf("--tag=TITLE=%v", trackTitle))
+			args = append(args, fmt.Sprintf("--tag=ARTIST=%v", artistStr))
+			if artFile != "" {
+				args = append(args, fmt.Sprintf("--picture=%v", artFile))
+			}
+			args = append(args, file)
+			flacCmd := exec.Command("flac", args...)
+			log.Printf("Running flac command: %v", flacCmd.String())
+			output, err := flacCmd.CombinedOutput()
+			log.Printf("Flac output: %v -> %v", err, string(output))
+		}
+
+		if artFile != "" {
+			os.Remove(artFile)
+		}
+	} else {
+		log.Printf("No full match (%v vs %v), converting in batch", len(splitFiles), expectedTracks)
+		args := []string{"--best", "--delete-input-file", "--output-prefix", dir + "/"}
+		args = append(args, splitFiles...)
+		flacCmd := exec.Command("flac", args...)
+		log.Printf("Running flac command: %v", flacCmd.String())
+		output, err := flacCmd.CombinedOutput()
+		log.Printf("Flac output: %v -> %v", err, string(output))
+	}
+	return nil
+}
+
 func (s *Server) processFiles(dir string) error {
 	// Lock to prevent stomping
 	s.r.pLock.Lock()
@@ -308,13 +393,15 @@ func (s *Server) processFiles(dir string) error {
 		var expectedTracks int
 		var offset int
 		var rcclient pbrc.RecordCollectionServiceClient
+		var release *pbgd.Release
 		if err == nil {
 			rcclient = pbrc.NewRecordCollectionServiceClient(conn)
 			res, err := rcclient.GetRecord(ctx, &pbrc.GetRecordRequest{ReleaseId: id})
 			if err == nil {
-				expectedTracks = getExpectedTracks(res.GetRecord().GetRelease(), disk)
+				release = res.GetRecord().GetRelease()
+				expectedTracks = getExpectedTracks(release, disk)
 				log.Printf("Found expected tracks: %v", expectedTracks)
-				offset = getTrackOffset(res.GetRecord().GetRelease(), disk)
+				offset = getTrackOffset(release, disk)
 			} else {
 				log.Printf("Error getting record for expected tracks: %v", err)
 			}
@@ -367,12 +454,14 @@ func (s *Server) processFiles(dir string) error {
 		}
 
 		// Convert to flac
-		args := []string{"--best", "--delete-input-file", "--output-prefix", dir + "/"}
-		args = append(args, splitFiles...)
-		flacCmd := exec.Command("flac", args...)
-		log.Printf("Running flac command: %v", flacCmd.String())
-		output, _ := flacCmd.CombinedOutput()
-		log.Printf("Flac output: %v -> %v", err, string(output))
+		err = s.convertToFlac(splitFiles, expectedTracks, release, offset, dir)
+		if err != nil {
+			if conn != nil {
+				conn.Close()
+			}
+			cancel()
+			return err
+		}
 
 		//Move file into save dir - we don't care if this fails
 		err = os.Mkdir(fmt.Sprintf("%v/%v", *saveDir, selems[0]), 0755)
@@ -385,11 +474,11 @@ func (s *Server) processFiles(dir string) error {
 			cancel()
 			return err
 		}
-		args = append([]string{}, flacFiles...)
+		args := append([]string{}, flacFiles...)
 		args = append(args, fmt.Sprintf("%v/%v/", *saveDir, selems[0]))
 		moveCmd := exec.Command("mv", args...)
 		log.Printf("Running move command: %v", moveCmd.String())
-		output, err = moveCmd.CombinedOutput()
+		output, err := moveCmd.CombinedOutput()
 		log.Printf("Move output: %v -> %v", err, string(output))
 
 		// Move the original file to retained directory if it wasn't joined
