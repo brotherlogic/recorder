@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -235,16 +237,57 @@ func (s *Server) processFiles(dir string) error {
 	if err != nil {
 		return err
 	}
-	for _, file := range entries {
-		log.Printf("Processing file: %v", file.Name())
 
-		if file.IsDir() || !strings.HasSuffix(file.Name(), ".wav") {
-			log.Printf("INVALID FILE: %v", file.Name())
+	groups := make(map[string][]string)
+	re := regexp.MustCompile(`(.*-\d{4}-\d{2}-\d{2})-(\d{2})$`)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".wav") {
+			continue
+		}
+		// Ignore track files
+		if strings.Contains(entry.Name(), "_track_") {
 			continue
 		}
 
-		strippedFile := file.Name()[:len(file.Name())-4]
-		elems := strings.Split(file.Name(), "-")
+		name := entry.Name()
+		prefix := name[:len(name)-4] // strip .wav
+		if matches := re.FindStringSubmatch(prefix); len(matches) > 1 {
+			prefix = matches[1]
+		}
+		groups[prefix] = append(groups[prefix], name)
+	}
+
+	for prefix, files := range groups {
+		log.Printf("Processing group: %v (%v files)", prefix, len(files))
+		sort.Strings(files)
+
+		var inputFile string
+		var isJoined bool
+		if len(files) > 1 {
+			inputFile = filepath.Join(dir, prefix+".w64")
+			var fullPaths []string
+			for _, f := range files {
+				fullPaths = append(fullPaths, filepath.Join(dir, f))
+			}
+			soxArgs := append(fullPaths, inputFile)
+			soxCmd := exec.Command("sox", soxArgs...)
+			log.Printf("Joining files with sox: %v", soxCmd.String())
+			out, err := soxCmd.CombinedOutput()
+			if err != nil {
+				log.Printf("Error joining files: %v -> %v", err, string(out))
+				return err
+			}
+			isJoined = true
+			for _, f := range files {
+				os.Rename(filepath.Join(dir, f), filepath.Join(retainedDir, f))
+			}
+		} else {
+			inputFile = filepath.Join(dir, files[0])
+			isJoined = false
+		}
+
+		strippedFile := prefix
+		elems := strings.Split(files[0], "-")
 		selems := strings.Split(elems[0], "_")
 
 		id64, err := strconv.ParseInt(selems[0], 10, 32)
@@ -280,12 +323,11 @@ func (s *Server) processFiles(dir string) error {
 		}
 
 		// Process the file
-		inputFile := filepath.Join(dir, file.Name())
 		if expectedTracks <= 0 {
 			log.Printf("Expected tracks is %v, defaulting to 2", expectedTracks)
 			expectedTracks = 2
 		}
-		files, err := s.splitWithSox(inputFile, dir, strippedFile, expectedTracks)
+		splitFiles, err := s.splitWithSox(inputFile, dir, strippedFile, expectedTracks)
 		if err != nil {
 			log.Printf("Error splitting with sox: %v", err)
 			if conn != nil {
@@ -297,7 +339,7 @@ func (s *Server) processFiles(dir string) error {
 
 		// Rename the tracks with the offset sequentially, using a .tmp step to avoid collisions
 		var tmpNames []string
-		for _, f := range files {
+		for _, f := range splitFiles {
 			tmpName := f + ".tmp"
 			err := os.Rename(f, tmpName)
 			if err != nil {
@@ -315,7 +357,7 @@ func (s *Server) processFiles(dir string) error {
 		}
 
 		// Re-glob to get updated names
-		files, err = filepath.Glob(filepath.Join(dir, fmt.Sprintf("%v_track_*.wav", strippedFile)))
+		splitFiles, err = filepath.Glob(filepath.Join(dir, fmt.Sprintf("%v_track_*.wav", strippedFile)))
 		if err != nil {
 			if conn != nil {
 				conn.Close()
@@ -326,7 +368,7 @@ func (s *Server) processFiles(dir string) error {
 
 		// Convert to flac
 		args := []string{"--best", "--delete-input-file", "--output-prefix", dir + "/"}
-		args = append(args, files...)
+		args = append(args, splitFiles...)
 		flacCmd := exec.Command("flac", args...)
 		log.Printf("Running flac command: %v", flacCmd.String())
 		output, _ := flacCmd.CombinedOutput()
@@ -350,10 +392,14 @@ func (s *Server) processFiles(dir string) error {
 		output, err = moveCmd.CombinedOutput()
 		log.Printf("Move output: %v -> %v", err, string(output))
 
-		// Move the original file to retained directory
-		err = os.Rename(filepath.Join(dir, file.Name()), filepath.Join(retainedDir, file.Name()))
-		if err != nil {
-			log.Printf("Error moving file to retained: %v", err)
+		// Move the original file to retained directory if it wasn't joined
+		if isJoined {
+			os.Remove(inputFile)
+		} else {
+			err = os.Rename(inputFile, filepath.Join(retainedDir, filepath.Base(inputFile)))
+			if err != nil {
+				log.Printf("Error moving file to retained: %v", err)
+			}
 		}
 
 		log.Printf("GLOB %v/%v*.wav", dir, strippedFile)
