@@ -1,0 +1,18 @@
+[Unit]
+Description=Vinyl Recorder Service
+After=network.target
+
+[Service]
+WorkingDirectory=/home/simon/recorder
+ExecStartPre=-/usr/bin/git pull
+ExecStartPre=/usr/bin/go build
+ExecStart=/home/simon/recorder/recorder
+Restart=always
+RestartSec=5
+User=simon
+Group=simon
+StandardOutput=append:/home/simon/recorder/recorder.log
+StandardError=append:/home/simon/recorder/recorder.log
+
+[Install]
+WantedBy=multi-user.target
