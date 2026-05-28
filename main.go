@@ -414,9 +414,26 @@ func (s *Server) processFiles(dir string) error {
 			log.Printf("Expected tracks is %v, defaulting to 2", expectedTracks)
 			expectedTracks = 2
 		}
+
+		originalInputFile := inputFile
+		stereoInputFile := inputFile + ".stereo.wav"
+		log.Printf("Remixing 4-channel input file %v to stereo %v...", inputFile, stereoInputFile)
+		remixCmd := exec.Command("sox", inputFile, stereoInputFile, "remix", "1", "2")
+		remixOut, err := remixCmd.CombinedOutput()
+		var useStereo bool
+		if err != nil {
+			log.Printf("Error remixing file to stereo: %v -> %v. Falling back to original input.", err, string(remixOut))
+		} else {
+			inputFile = stereoInputFile
+			useStereo = true
+		}
+
 		splitFiles, err := s.splitWithSox(inputFile, dir, strippedFile, expectedTracks)
 		if err != nil {
 			log.Printf("Error splitting with sox: %v", err)
+			if useStereo {
+				os.Remove(stereoInputFile)
+			}
 			if conn != nil {
 				conn.Close()
 			}
@@ -481,11 +498,16 @@ func (s *Server) processFiles(dir string) error {
 		output, err := moveCmd.CombinedOutput()
 		log.Printf("Move output: %v -> %v", err, string(output))
 
+		// Clean up stereo file if used
+		if useStereo {
+			os.Remove(stereoInputFile)
+		}
+
 		// Move the original file to retained directory if it wasn't joined
 		if isJoined {
-			os.Remove(inputFile)
+			os.Remove(originalInputFile)
 		} else {
-			err = os.Rename(inputFile, filepath.Join(retainedDir, filepath.Base(inputFile)))
+			err = os.Rename(originalInputFile, filepath.Join(retainedDir, filepath.Base(originalInputFile)))
 			if err != nil {
 				log.Printf("Error moving file to retained: %v", err)
 			}
