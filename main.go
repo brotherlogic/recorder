@@ -143,7 +143,8 @@ func (s *Server) splitWithSox(inputFile string, procDir string, strippedFile str
 	}
 
 	outPattern := filepath.Join(tmpDir, strippedFile+"_track_.wav")
-	soxCmd := exec.Command("sox", inputFile, outPattern, "silence", "1", duration, threshold, "1", duration, threshold, ":", "newfile", ":", "restart")
+	soxArgs := []string{"-n", "19", "ionice", "-c", "3", "sox", inputFile, outPattern, "silence", "1", duration, threshold, "1", duration, threshold, ":", "newfile", ":", "restart"}
+	soxCmd := exec.Command("nice", soxArgs...)
 	output, err := soxCmd.CombinedOutput()
 
 	if err != nil {
@@ -285,7 +286,8 @@ func (s *Server) convertToFlac(splitFiles []string, expectedTracks int, release 
 				args = append(args, fmt.Sprintf("--picture=%v", artFile))
 			}
 			args = append(args, file)
-			flacCmd := exec.Command("flac", args...)
+			flacArgs := append([]string{"-n", "19", "ionice", "-c", "3", "flac"}, args...)
+			flacCmd := exec.Command("nice", flacArgs...)
 			log.Printf("Running flac command: %v", flacCmd.String())
 			output, err := flacCmd.CombinedOutput()
 			log.Printf("Flac output: %v -> %v", err, string(output))
@@ -298,12 +300,31 @@ func (s *Server) convertToFlac(splitFiles []string, expectedTracks int, release 
 		log.Printf("No full match (%v vs %v), converting in batch", len(splitFiles), expectedTracks)
 		args := []string{"--best", "--delete-input-file", "--output-prefix", dir + "/"}
 		args = append(args, splitFiles...)
-		flacCmd := exec.Command("flac", args...)
+		flacArgs := append([]string{"-n", "19", "ionice", "-c", "3", "flac"}, args...)
+		flacCmd := exec.Command("nice", flacArgs...)
 		log.Printf("Running flac command: %v", flacCmd.String())
 		output, err := flacCmd.CombinedOutput()
 		log.Printf("Flac output: %v -> %v", err, string(output))
 	}
 	return nil
+}
+
+func getChannelCount(inputFile string) (int, error) {
+	cmd := exec.Command("soxi", "-c", inputFile)
+	out, err := cmd.Output()
+	if err != nil {
+		cmd = exec.Command("sox", "--info", "-c", inputFile)
+		out, err = cmd.Output()
+		if err != nil {
+			return 0, err
+		}
+	}
+	chansStr := strings.TrimSpace(string(out))
+	chans, err := strconv.Atoi(chansStr)
+	if err != nil {
+		return 0, err
+	}
+	return chans, nil
 }
 
 func (s *Server) processFiles(dir string) error {
@@ -355,7 +376,8 @@ func (s *Server) processFiles(dir string) error {
 				fullPaths = append(fullPaths, filepath.Join(dir, f))
 			}
 			soxArgs := append(fullPaths, inputFile)
-			soxCmd := exec.Command("sox", soxArgs...)
+			niceArgs := append([]string{"-n", "19", "ionice", "-c", "3", "sox"}, soxArgs...)
+			soxCmd := exec.Command("nice", niceArgs...)
 			log.Printf("Joining files with sox: %v", soxCmd.String())
 			out, err := soxCmd.CombinedOutput()
 			if err != nil {
@@ -416,16 +438,28 @@ func (s *Server) processFiles(dir string) error {
 		}
 
 		originalInputFile := inputFile
-		stereoInputFile := inputFile + ".stereo.wav"
-		log.Printf("Remixing 4-channel input file %v to stereo %v...", inputFile, stereoInputFile)
-		remixCmd := exec.Command("sox", inputFile, stereoInputFile, "remix", "1", "2")
-		remixOut, err := remixCmd.CombinedOutput()
 		var useStereo bool
+		var stereoInputFile string
+
+		channels, err := getChannelCount(inputFile)
 		if err != nil {
-			log.Printf("Error remixing file to stereo: %v -> %v. Falling back to original input.", err, string(remixOut))
+			log.Printf("Error detecting channels for %v: %v. Assuming 2 channels.", inputFile, err)
+			channels = 2
+		}
+
+		if channels == 4 {
+			stereoInputFile = inputFile + ".stereo.wav"
+			log.Printf("Remixing 4-channel input file %v to stereo %v...", inputFile, stereoInputFile)
+			remixCmd := exec.Command("nice", "-n", "19", "ionice", "-c", "3", "sox", inputFile, stereoInputFile, "remix", "1", "2")
+			remixOut, err := remixCmd.CombinedOutput()
+			if err != nil {
+				log.Printf("Error remixing file to stereo: %v -> %v. Falling back to original input.", err, string(remixOut))
+			} else {
+				inputFile = stereoInputFile
+				useStereo = true
+			}
 		} else {
-			inputFile = stereoInputFile
-			useStereo = true
+			log.Printf("Input file %v has %d channels, skipping remix step.", inputFile, channels)
 		}
 
 		splitFiles, err := s.splitWithSox(inputFile, dir, strippedFile, expectedTracks)
@@ -562,8 +596,8 @@ func (r *Recorder) runRecord() error {
 		diskRef = fmt.Sprintf("%v-%v.wav", num, date)
 	}
 
-	r.cmd = exec.Command("arecord", "--device", "hw:0,0", "--format", "S32_LE", "--rate", "44100", "--channels", "4", diskRef)
-	log.Printf("Starging record")
+	r.cmd = exec.Command("arecord", "--device", "plughw:0,0", "--format", "S32_LE", "--rate", "44100", "--channels", "2", "--buffer-time", "2000000", diskRef)
+	log.Printf("Starting record")
 	output, err := r.cmd.CombinedOutput()
 	log.Printf("Error: %v -> %v", err, string(output))
 	r.cmd.Wait()
