@@ -347,7 +347,7 @@ func (s *Server) processFiles(dir string) error {
 	groups := make(map[string][]string)
 	re := regexp.MustCompile(`(.*-\d{4}-\d{2}-\d{2})-(\d{2})$`)
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".wav") {
+		if entry.IsDir() || (!strings.HasSuffix(entry.Name(), ".wav") && !strings.HasSuffix(entry.Name(), ".w64")) {
 			continue
 		}
 		// Ignore track files
@@ -596,7 +596,7 @@ func (r *Recorder) runRecord() error {
 		diskRef = fmt.Sprintf("%v-%v.wav", num, date)
 	}
 
-	r.cmd = exec.Command("arecord", "--device", "plug:scarlett_2ch", "--format", "S32_LE", "--rate", "44100", "--channels", "2", "--buffer-time", "2000000", diskRef)
+	r.cmd = exec.Command("arecord", "--device", "scarlett_2ch", "--format", "S32_LE", "--rate", "48000", "--channels", "2", "--buffer-time", "500000", diskRef)
 	log.Printf("Starting record")
 	output, err := r.cmd.CombinedOutput()
 	log.Printf("Error: %v -> %v", err, string(output))
