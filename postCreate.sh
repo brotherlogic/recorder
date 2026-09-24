@@ -14,6 +14,13 @@ tic -x ghostty.terminfo
 # Install tmux and emacs
 sudo apt-get update && sudo apt-get install -y tmux emacs
 
+# Set git identity
+git config --global user.email "brotherlogicautomation@gmail.com"
+git config --global user.name "Brotherlogic Automation"
+
+# Install Antigravity CLI
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+
 # Auto-start tmux in zsh
 if ! grep -q "tmux attach-session" ~/.zshrc; then
     echo -e "\n# Auto-start tmux\nif [[ -z \"\$TMUX\" && -o interactive ]]; then\n    tmux attach-session -t default || tmux new-session -s default\nfi" >> ~/.zshrc

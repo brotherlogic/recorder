@@ -23,7 +23,7 @@
 	// "remoteUser": "root"
 	"workspaceFolder": "/workspaces/recorder",
 	"workingDir": "/workspaces/recorder",
-	"initializeCommand": "echo \"GH_TOKEN=$(gh auth token)\" > .devcontainer/.env.auth",
+"initializeCommand": "cat ~/.seraphine-automation > .devcontainer/.env.auth",
 	"runArgs": [
 		"--security-opt",
 	    "label=disable",
