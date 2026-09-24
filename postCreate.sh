@@ -21,7 +21,17 @@ git config --global user.name "Brotherlogic Automation"
 # Install Antigravity CLI
 curl -fsSL https://antigravity.google/cli/install.sh | bash
 
-# Auto-start tmux in zsh
-if ! grep -q "tmux attach-session" ~/.zshrc; then
-    echo -e "\n# Auto-start tmux\nif [[ -z \"\$TMUX\" && -o interactive ]]; then\n    tmux attach-session -t default || tmux new-session -s default\nfi" >> ~/.zshrc
+
+TMUX_BLOCK=$(cat << 'EOF'
+if [ -z "$TMUX" ] && [ -n "$PS1" ]; then
+  cd /workspaces/recorder
+  /workspaces/recorder/start-tmux.sh && tmux attach-session -t recorder
 fi
+EOF
+)
+
+grep -q "tmux attach-session" ~/.zshrc || echo "$TMUX_BLOCK" >> ~/.zshrc
+grep -q "tmux attach-session" ~/.bashrc || echo "$TMUX_BLOCK" >> ~/.bashrc
+
+# Ensure the session is created
+/workspaces/recorder/start-tmux.sh
