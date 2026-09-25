@@ -265,7 +265,7 @@ func parseDbValue(valStr string) (float64, error) {
 }
 
 // CalculateTrackCleanliness computes the 0-50 cleanliness score for given audio stats.
-func CalculateTrackCleanliness(stats *SoxStats) int32 {
+func CalculateTrackCleanliness(stats *SoxStats, hasLongSilence bool) int32 {
 	if stats == nil {
 		return 0
 	}
@@ -282,14 +282,26 @@ func CalculateTrackCleanliness(stats *SoxStats) int32 {
 		score -= deduction
 	}
 
-	// 2. Deduct for elevated noise floor relative to dynamic range
-	dynamicRange := stats.PeakDb - stats.RmsDb
-	if dynamicRange < 10.0 {
-		deduction := int32((10.0 - dynamicRange) * 2)
-		if deduction < 5 {
-			deduction = 5
+	// 2. Deduct for low dynamic range / elevated noise floor
+	var drDeduction int32
+	if stats.PeakDb <= -100.0 || math.IsInf(stats.PeakDb, -1) {
+		drDeduction = 20
+	} else {
+		dynamicRange := stats.PeakDb - stats.RmsDb
+		if dynamicRange < 15.0 {
+			drDeduction = int32((15.0 - dynamicRange) * 2)
+			if drDeduction < 5 {
+				drDeduction = 5
+			} else if drDeduction > 20 {
+				drDeduction = 20
+			}
 		}
-		score -= deduction
+	}
+	score -= drDeduction
+
+	// 3. Deduct for long silence
+	if hasLongSilence {
+		score -= 10
 	}
 
 	if score < 0 {
@@ -347,7 +359,7 @@ func AnalyzeTrack(filePath string) (*TrackQuality, error) {
 		}, nil
 	}
 
-	score := CalculateTrackCleanliness(stats)
+	score := CalculateTrackCleanliness(stats, false)
 
 	return &TrackQuality{
 		Filename:     filePath,
