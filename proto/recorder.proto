@@ -12,3 +12,15 @@ message NewRecordResponse{}
 service RecordGetter {
   rpc NewRecord(NewRecordRequest) returns (NewRecordResponse);
 }
+
+message GetQualityRequest {
+  int64 release_id = 1;
+}
+
+message GetQualityResponse {
+  int32 score = 1;
+}
+
+service QualityService {
+  rpc GetQuality(GetQualityRequest) returns (GetQualityResponse);
+}
