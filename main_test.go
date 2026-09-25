@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"flag"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,7 +13,14 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+
 	pbgd "github.com/brotherlogic/godiscogs/proto"
+	pbrc "github.com/brotherlogic/recordcollection/proto"
+	pb "github.com/brotherlogic/recorder/proto"
 )
 
 func TestCleanupRetainedFiles(t *testing.T) {
@@ -455,5 +465,76 @@ func TestConvertToFlacNoMatch(t *testing.T) {
 		t.Errorf("did not expect TITLE tag when track counts do not match")
 	}
 }
+
+func TestQualityPortFlagDeclared(t *testing.T) {
+	if qualityPort == nil {
+		t.Fatalf("qualityPort flag is not declared")
+	}
+	if *qualityPort != 8087 {
+		t.Errorf("expected default qualityPort to be 8087, got %d", *qualityPort)
+	}
+
+	f := flag.Lookup("quality_port")
+	if f == nil {
+		t.Fatalf("flag quality_port not registered in flag set")
+	}
+	if f.DefValue != "8087" {
+		t.Errorf("expected default flag value 8087, got %v", f.DefValue)
+	}
+}
+
+func TestStartQualityServiceEndToEnd(t *testing.T) {
+	tempDir := t.TempDir()
+	relID := int64(12345)
+
+	mockClient := &mockRecordCollectionClient{
+		getRecordFunc: func(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error) {
+			return nil, status.Errorf(codes.NotFound, "release not found")
+		},
+	}
+
+	// Start quality service on dynamic port 0
+	grpcServer, lis, err := startQualityService(0, tempDir, mockClient)
+	if err != nil {
+		t.Fatalf("startQualityService failed: %v", err)
+	}
+	defer grpcServer.GracefulStop()
+	defer lis.Close()
+
+	addr := lis.Addr().String()
+	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("failed to dial quality service at %s: %v", addr, err)
+	}
+	defer conn.Close()
+
+	client := pb.NewQualityServiceClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err = client.GetQuality(ctx, &pb.GetQualityRequest{ReleaseId: relID})
+	if err == nil {
+		t.Fatalf("expected error from GetQuality on non-existent release, got nil")
+	}
+	if status.Code(err) != codes.NotFound {
+		t.Errorf("expected NotFound error code, got %v", err)
+	}
+}
+
+func TestStartQualityServiceListenError(t *testing.T) {
+	// Occupy a port
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer l.Close()
+
+	port := l.Addr().(*net.TCPAddr).Port
+	_, _, err = startQualityService(port, "", nil)
+	if err == nil {
+		t.Errorf("expected error when port %d is already in use, got nil", port)
+	}
+}
+
 
 
