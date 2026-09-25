@@ -1093,3 +1093,145 @@ func TestCalculateTrackCleanliness(t *testing.T) {
 	})
 }
 
+func TestDetectLongSilence(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Track with a 6-second silence interval: triggers true
+	t1 := filepath.Join(tmpDir, "tone1.wav")
+	s6 := filepath.Join(tmpDir, "silence6.wav")
+	t2 := filepath.Join(tmpDir, "tone2.wav")
+	if err := exec.Command("sox", "-n", "-r", "44100", "-c", "2", t1, "synth", "6.0", "sine", "1000", "vol", "-6dB").Run(); err != nil {
+		t.Fatalf("failed to create tone1: %v", err)
+	}
+	if err := exec.Command("sox", "-n", "-r", "44100", "-c", "2", s6, "trim", "0", "6.0").Run(); err != nil {
+		t.Fatalf("failed to create silence6: %v", err)
+	}
+	if err := exec.Command("sox", "-n", "-r", "44100", "-c", "2", t2, "synth", "6.0", "sine", "1000", "vol", "-6dB").Run(); err != nil {
+		t.Fatalf("failed to create tone2: %v", err)
+	}
+	trackWith6sSilence := filepath.Join(tmpDir, "track_6s_silence.flac")
+	if err := exec.Command("sox", t1, s6, t2, trackWith6sSilence).Run(); err != nil {
+		t.Fatalf("failed to combine track with 6s silence: %v", err)
+	}
+
+	hasLongSilence, err := DetectLongSilence(trackWith6sSilence)
+	if err != nil {
+		t.Fatalf("unexpected error from DetectLongSilence on 6s silence track: %v", err)
+	}
+	if !hasLongSilence {
+		t.Errorf("expected DetectLongSilence to return true for 6-second silence interval, got false")
+	}
+
+	// 2. Track with a 3-second silence interval: triggers false
+	s3 := filepath.Join(tmpDir, "silence3.wav")
+	if err := exec.Command("sox", "-n", "-r", "44100", "-c", "2", s3, "trim", "0", "3.0").Run(); err != nil {
+		t.Fatalf("failed to create silence3: %v", err)
+	}
+	trackWith3sSilence := filepath.Join(tmpDir, "track_3s_silence.flac")
+	if err := exec.Command("sox", t1, s3, t2, trackWith3sSilence).Run(); err != nil {
+		t.Fatalf("failed to combine track with 3s silence: %v", err)
+	}
+
+	hasLongSilence3s, err := DetectLongSilence(trackWith3sSilence)
+	if err != nil {
+		t.Fatalf("unexpected error from DetectLongSilence on 3s silence track: %v", err)
+	}
+	if hasLongSilence3s {
+		t.Errorf("expected DetectLongSilence to return false for 3-second silence interval, got true")
+	}
+
+	// 3. Track under 5 seconds total duration: triggers false
+	trackShort := filepath.Join(tmpDir, "track_under_5s.flac")
+	if err := exec.Command("sox", "-n", "-r", "44100", "-c", "2", trackShort, "synth", "4.0", "sine", "1000", "vol", "-6dB").Run(); err != nil {
+		t.Fatalf("failed to create short track: %v", err)
+	}
+
+	hasLongSilenceShort, err := DetectLongSilence(trackShort)
+	if err != nil {
+		t.Fatalf("unexpected error from DetectLongSilence on track under 5s: %v", err)
+	}
+	if hasLongSilenceShort {
+		t.Errorf("expected DetectLongSilence to return false for track under 5s, got true")
+	}
+
+	// 4. Pure silence track: triggers true
+	trackPureSilence := filepath.Join(tmpDir, "track_pure_silence.flac")
+	if err := exec.Command("sox", "-n", "-r", "44100", "-c", "2", trackPureSilence, "trim", "0", "8.0").Run(); err != nil {
+		t.Fatalf("failed to create pure silence track: %v", err)
+	}
+
+	hasLongSilencePure, err := DetectLongSilence(trackPureSilence)
+	if err != nil {
+		t.Fatalf("unexpected error from DetectLongSilence on pure silence track: %v", err)
+	}
+	if !hasLongSilencePure {
+		t.Errorf("expected DetectLongSilence to return true for pure silence track, got false")
+	}
+}
+
+func TestAnalyzeTrack(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Verifies correct population of DynamicRange, HasLongSilence, and Score for clean audio without silence
+	cleanFile := filepath.Join(tmpDir, "clean.flac")
+	if err := exec.Command("sox", "-n", "-r", "44100", "-c", "2", cleanFile, "synth", "0.1", "sine", "1000", "pad", "0", "1.5", "repeat", "5", "vol", "-3dB").Run(); err != nil {
+		t.Fatalf("failed to create clean audio: %v", err)
+	}
+
+	tqClean, err := AnalyzeTrack(cleanFile)
+	if err != nil {
+		t.Fatalf("unexpected error analyzing clean track: %v", err)
+	}
+	if tqClean.HasLongSilence {
+		t.Errorf("expected HasLongSilence=false for clean track, got true")
+	}
+	if tqClean.DynamicRange < 0 {
+		t.Errorf("expected DynamicRange >= 0, got %v", tqClean.DynamicRange)
+	}
+	if tqClean.Score < 45 || tqClean.Score > 50 {
+		t.Errorf("expected Score between 45 and 50 for clean track, got %d", tqClean.Score)
+	}
+
+	// 2. Verifies correct population of DynamicRange, HasLongSilence, and Score for track with 6-second silence
+	s6 := filepath.Join(tmpDir, "s6.wav")
+	exec.Command("sox", "-n", "-r", "44100", "-c", "2", s6, "trim", "0", "6.0").Run()
+	silenceFile := filepath.Join(tmpDir, "silence.flac")
+	if err := exec.Command("sox", cleanFile, s6, cleanFile, silenceFile).Run(); err != nil {
+		t.Fatalf("failed to create silence track: %v", err)
+	}
+
+	tqSilence, err := AnalyzeTrack(silenceFile)
+	if err != nil {
+		t.Fatalf("unexpected error analyzing silence track: %v", err)
+	}
+	if !tqSilence.HasLongSilence {
+		t.Errorf("expected HasLongSilence=true for track with 6s silence, got false")
+	}
+	if tqSilence.Score > tqClean.Score-10 {
+		t.Errorf("expected Score with long silence to be penalized by at least 10 pts (clean=%d, silence=%d)", tqClean.Score, tqSilence.Score)
+	}
+
+	// 3. Verifies fault tolerance on missing or corrupted FLAC files
+	missingFile := filepath.Join(tmpDir, "nonexistent.flac")
+	tqMissing, err := AnalyzeTrack(missingFile)
+	if err != nil {
+		t.Fatalf("unexpected error on missing file: %v", err)
+	}
+	if tqMissing.Score != 0 {
+		t.Errorf("expected Score=0 for missing file, got %d", tqMissing.Score)
+	}
+
+	corruptFile := filepath.Join(tmpDir, "corrupted.flac")
+	if err := os.WriteFile(corruptFile, []byte("NOT_A_VALID_FLAC_DATA"), 0644); err != nil {
+		t.Fatalf("failed to write corrupted file: %v", err)
+	}
+	tqCorrupt, err := AnalyzeTrack(corruptFile)
+	if err != nil {
+		t.Fatalf("unexpected error on corrupted file: %v", err)
+	}
+	if tqCorrupt.Score != 0 {
+		t.Errorf("expected Score=0 for corrupted file, got %d", tqCorrupt.Score)
+	}
+}
+
+
