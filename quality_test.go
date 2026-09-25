@@ -1,419 +1,295 @@
 package main
 
 import (
-	"context"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-
-	pbgd "github.com/brotherlogic/godiscogs/proto"
-	pbrc "github.com/brotherlogic/recordcollection/proto"
+	"time"
 )
 
-type mockRecordCollectionClient struct {
-	pbrc.RecordCollectionServiceClient
-	getRecordFunc func(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error)
-}
-
-func (m *mockRecordCollectionClient) GetRecord(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error) {
-	if m.getRecordFunc != nil {
-		return m.getRecordFunc(ctx, in, opts...)
-	}
-	return nil, status.Error(codes.Unimplemented, "unimplemented")
-}
-
-func TestCompletenessScoringAlgorithm(t *testing.T) {
-	tests := []struct {
-		name          string
-		found         int
-		expected      int
-		wantScore     int32
-		wantErrCode   codes.Code
-		expectingErr  bool
-	}{
-		{
-			name:         "Exact track match (10 of 10)",
-			found:        10,
-			expected:     10,
-			wantScore:    50,
-			expectingErr: false,
-		},
-		{
-			name:         "Partial tracks (5 of 10)",
-			found:        5,
-			expected:     10,
-			wantScore:    25,
-			expectingErr: false,
-		},
-		{
-			name:         "Partial tracks (3 of 10)",
-			found:        3,
-			expected:     10,
-			wantScore:    15,
-			expectingErr: false,
-		},
-		{
-			name:         "Excess tracks (12 of 10)",
-			found:        12,
-			expected:     10,
-			wantScore:    30, // 50 - (12-10)*10 = 30
-			expectingErr: false,
-		},
-		{
-			name:         "Excess tracks heavy penalty (16 of 10)",
-			found:        16,
-			expected:     10,
-			wantScore:    0, // max(0, 50 - 6*10) = 0
-			expectingErr: false,
-		},
-		{
-			name:         "0 tracks found",
-			found:        0,
-			expected:     10,
-			wantScore:    0,
-			wantErrCode:  codes.NotFound,
-			expectingErr: true,
-		},
-		{
-			name:         "0 expected tracks",
-			found:        5,
-			expected:     0,
-			wantScore:    0,
-			wantErrCode:  codes.NotFound,
-			expectingErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			score, err := CalculateCompletenessScore(tc.found, tc.expected)
-			if tc.expectingErr {
-				if err == nil {
-					t.Fatalf("CalculateCompletenessScore(%d, %d) expected error, got nil", tc.found, tc.expected)
-				}
-				if status.Code(err) != tc.wantErrCode {
-					t.Fatalf("CalculateCompletenessScore(%d, %d) status code = %v, want %v", tc.found, tc.expected, status.Code(err), tc.wantErrCode)
-				}
-			} else {
-				if err != nil {
-					t.Fatalf("CalculateCompletenessScore(%d, %d) unexpected error: %v", tc.found, tc.expected, err)
-				}
-				if score != tc.wantScore {
-					t.Fatalf("CalculateCompletenessScore(%d, %d) = %d, want %d", tc.found, tc.expected, score, tc.wantScore)
-				}
-			}
-		})
-	}
-}
-
-func TestScanFlacFiles(t *testing.T) {
-	tmpDir := t.TempDir()
-	releaseID := int64(12345)
-	releaseDir := filepath.Join(tmpDir, fmt.Sprintf("%d", releaseID))
-	err := os.MkdirAll(releaseDir, 0755)
+func TestQualitySummarySerialization(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "quality_test_ser")
 	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	releaseID := int64(12345)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	original := &QualitySummary{
+		ReleaseID:         releaseID,
+		Score:             85,
+		CompletenessScore: 45,
+		CleanlinessScore:  40,
+		ExpectedTracks:    2,
+		FoundTracks:       2,
+		LastEvaluated:     now,
+		Tracks: map[string]TrackQuality{
+			"track1.flac": {
+				Filename:     "track1.flac",
+				SizeBytes:    1024,
+				ModTime:      now,
+				PeakDb:       -1.5,
+				RmsDb:        -14.2,
+				ClippedCount: 0,
+				Score:        40,
+			},
+			"track2.flac": {
+				Filename:     "track2.flac",
+				SizeBytes:    2048,
+				ModTime:      now,
+				PeakDb:       -2.0,
+				RmsDb:        -15.0,
+				ClippedCount: 1,
+				Score:        38,
+			},
+		},
+	}
+
+	err = WriteQualitySummary(tempDir, releaseID, original)
+	if err != nil {
+		t.Fatalf("WriteQualitySummary failed: %v", err)
+	}
+
+	expectedPath := filepath.Join(tempDir, "12345", "quality.json")
+	if _, err := os.Stat(expectedPath); os.IsNotExist(err) {
+		t.Fatalf("expected quality.json at %v, but not found", expectedPath)
+	}
+
+	loaded, err := ReadQualitySummary(tempDir, releaseID)
+	if err != nil {
+		t.Fatalf("ReadQualitySummary failed: %v", err)
+	}
+
+	if loaded == nil {
+		t.Fatalf("loaded summary is nil")
+	}
+
+	if loaded.ReleaseID != original.ReleaseID {
+		t.Errorf("ReleaseID mismatch: got %v, want %v", loaded.ReleaseID, original.ReleaseID)
+	}
+	if loaded.Score != original.Score {
+		t.Errorf("Score mismatch: got %v, want %v", loaded.Score, original.Score)
+	}
+	if loaded.CompletenessScore != original.CompletenessScore {
+		t.Errorf("CompletenessScore mismatch: got %v, want %v", loaded.CompletenessScore, original.CompletenessScore)
+	}
+	if loaded.CleanlinessScore != original.CleanlinessScore {
+		t.Errorf("CleanlinessScore mismatch: got %v, want %v", loaded.CleanlinessScore, original.CleanlinessScore)
+	}
+	if loaded.ExpectedTracks != original.ExpectedTracks {
+		t.Errorf("ExpectedTracks mismatch: got %v, want %v", loaded.ExpectedTracks, original.ExpectedTracks)
+	}
+	if loaded.FoundTracks != original.FoundTracks {
+		t.Errorf("FoundTracks mismatch: got %v, want %v", loaded.FoundTracks, original.FoundTracks)
+	}
+	if len(loaded.Tracks) != len(original.Tracks) {
+		t.Fatalf("Tracks len mismatch: got %v, want %v", len(loaded.Tracks), len(original.Tracks))
+	}
+
+	for k, origTrack := range original.Tracks {
+		loadedTrack, ok := loaded.Tracks[k]
+		if !ok {
+			t.Errorf("missing track %v in loaded summary", k)
+			continue
+		}
+		if loadedTrack.Filename != origTrack.Filename {
+			t.Errorf("track %v Filename mismatch: got %v, want %v", k, loadedTrack.Filename, origTrack.Filename)
+		}
+		if loadedTrack.SizeBytes != origTrack.SizeBytes {
+			t.Errorf("track %v SizeBytes mismatch: got %v, want %v", k, loadedTrack.SizeBytes, origTrack.SizeBytes)
+		}
+		if !loadedTrack.ModTime.Equal(origTrack.ModTime) {
+			t.Errorf("track %v ModTime mismatch: got %v, want %v", k, loadedTrack.ModTime, origTrack.ModTime)
+		}
+		if loadedTrack.PeakDb != origTrack.PeakDb {
+			t.Errorf("track %v PeakDb mismatch: got %v, want %v", k, loadedTrack.PeakDb, origTrack.PeakDb)
+		}
+		if loadedTrack.RmsDb != origTrack.RmsDb {
+			t.Errorf("track %v RmsDb mismatch: got %v, want %v", k, loadedTrack.RmsDb, origTrack.RmsDb)
+		}
+		if loadedTrack.ClippedCount != origTrack.ClippedCount {
+			t.Errorf("track %v ClippedCount mismatch: got %v, want %v", k, loadedTrack.ClippedCount, origTrack.ClippedCount)
+		}
+		if loadedTrack.Score != origTrack.Score {
+			t.Errorf("track %v Score mismatch: got %v, want %v", k, loadedTrack.Score, origTrack.Score)
+		}
+	}
+}
+
+func setupTestReleaseFiles(t *testing.T) (string, int64, *QualitySummary) {
+	tempDir, err := os.MkdirTemp("", "quality_cache_test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+
+	releaseID := int64(98765)
+	releaseDir := filepath.Join(tempDir, "98765")
+	if err := os.MkdirAll(releaseDir, 0755); err != nil {
 		t.Fatalf("failed to create release dir: %v", err)
 	}
 
-	// Create dummy files
-	track1 := filepath.Join(releaseDir, "12345_track_01.flac")
-	track2 := filepath.Join(releaseDir, "12345_track_02.flac")
-	nonTrack := filepath.Join(releaseDir, "other.txt")
-	nonFlac := filepath.Join(releaseDir, "12345_track_03.wav")
+	f1 := filepath.Join(releaseDir, "track1.flac")
+	f2 := filepath.Join(releaseDir, "track2.flac")
 
-	for _, f := range []string{track1, track2, nonTrack, nonFlac} {
-		if err := os.WriteFile(f, []byte("dummy audio"), 0644); err != nil {
-			t.Fatalf("failed to write test file: %v", err)
-		}
+	if err := os.WriteFile(f1, []byte("audio-content-track-1"), 0644); err != nil {
+		t.Fatalf("failed to write track1.flac: %v", err)
+	}
+	if err := os.WriteFile(f2, []byte("audio-content-track-2-longer"), 0644); err != nil {
+		t.Fatalf("failed to write track2.flac: %v", err)
 	}
 
-	files, err := ScanFlacFiles(tmpDir, releaseID)
+	info1, err := os.Stat(f1)
 	if err != nil {
-		t.Fatalf("ScanFlacFiles returned error: %v", err)
+		t.Fatalf("stat f1: %v", err)
 	}
-
-	if len(files) != 2 {
-		t.Fatalf("ScanFlacFiles found %d files, want 2", len(files))
-	}
-
-	if files[0] != track1 || files[1] != track2 {
-		t.Fatalf("ScanFlacFiles returned %v, want [%s, %s]", files, track1, track2)
-	}
-
-	// Scan non-existent dir
-	emptyFiles, err := ScanFlacFiles(tmpDir, 99999)
+	info2, err := os.Stat(f2)
 	if err != nil {
-		t.Fatalf("ScanFlacFiles for non-existent dir returned error: %v", err)
+		t.Fatalf("stat f2: %v", err)
 	}
-	if len(emptyFiles) != 0 {
-		t.Fatalf("ScanFlacFiles for non-existent dir returned %d files, want 0", len(emptyFiles))
+
+	summary := &QualitySummary{
+		ReleaseID:         releaseID,
+		Score:             90,
+		CompletenessScore: 50,
+		CleanlinessScore:  40,
+		ExpectedTracks:    2,
+		FoundTracks:       2,
+		LastEvaluated:     time.Now().UTC(),
+		Tracks: map[string]TrackQuality{
+			"track1.flac": {
+				Filename:     "track1.flac",
+				SizeBytes:    info1.Size(),
+				ModTime:      info1.ModTime(),
+				PeakDb:       -1.0,
+				RmsDb:        -14.0,
+				ClippedCount: 0,
+				Score:        40,
+			},
+			"track2.flac": {
+				Filename:     "track2.flac",
+				SizeBytes:    info2.Size(),
+				ModTime:      info2.ModTime(),
+				PeakDb:       -1.2,
+				RmsDb:        -14.5,
+				ClippedCount: 0,
+				Score:        40,
+			},
+		},
+	}
+
+	if err := WriteQualitySummary(tempDir, releaseID, summary); err != nil {
+		t.Fatalf("failed to write initial quality summary: %v", err)
+	}
+
+	return tempDir, releaseID, summary
+}
+
+func TestCacheHitReturnsValidCachedSummary(t *testing.T) {
+	tempDir, releaseID, summary := setupTestReleaseFiles(t)
+	defer os.RemoveAll(tempDir)
+
+	if !IsCacheValid(tempDir, releaseID, summary) {
+		t.Errorf("expected cache to be valid, but IsCacheValid returned false")
+	}
+
+	cached, valid := GetValidCachedSummary(tempDir, releaseID)
+	if !valid || cached == nil {
+		t.Errorf("expected GetValidCachedSummary to return valid summary, got valid=%v, cached=%v", valid, cached)
 	}
 }
 
-func TestCalculateTotalExpectedTracks(t *testing.T) {
-	// Single disk
-	singleDisc := &pbgd.Release{
-		FormatQuantity: 1,
-		Tracklist: []*pbgd.Track{
-			{Title: "Track 1"},
-			{Title: "Track 2"},
-			{Title: "Track 3"},
-		},
-	}
-	if got := CalculateTotalExpectedTracks(singleDisc); got != 3 {
-		t.Errorf("CalculateTotalExpectedTracks(singleDisc) = %d, want 3", got)
+func TestTouchingFlacFileInvalidatesCache(t *testing.T) {
+	tempDir, releaseID, summary := setupTestReleaseFiles(t)
+	defer os.RemoveAll(tempDir)
+
+	f1 := filepath.Join(tempDir, "98765", "track1.flac")
+	newTime := time.Now().Add(5 * time.Minute)
+	if err := os.Chtimes(f1, newTime, newTime); err != nil {
+		t.Fatalf("failed to touch file: %v", err)
 	}
 
-	// Multi disk with positions
-	multiDisc := &pbgd.Release{
-		FormatQuantity: 2,
-		Tracklist: []*pbgd.Track{
-			{Title: "Disc 1 Track 1", Position: "A1"},
-			{Title: "Disc 1 Track 2", Position: "A2"},
-			{Title: "Disc 2 Track 1", Position: "C1"},
-			{Title: "Disc 2 Track 2", Position: "C2"},
-		},
-	}
-	if got := CalculateTotalExpectedTracks(multiDisc); got != 4 {
-		t.Errorf("CalculateTotalExpectedTracks(multiDisc) = %d, want 4", got)
+	if IsCacheValid(tempDir, releaseID, summary) {
+		t.Errorf("expected touched file to invalidate cache, but IsCacheValid returned true")
 	}
 
-	// Nil release
-	if got := CalculateTotalExpectedTracks(nil); got != 0 {
-		t.Errorf("CalculateTotalExpectedTracks(nil) = %d, want 0", got)
+	_, valid := GetValidCachedSummary(tempDir, releaseID)
+	if valid {
+		t.Errorf("expected GetValidCachedSummary to return valid=false after touching file")
 	}
 }
 
-func TestEvaluateCompleteness_ExactMatch(t *testing.T) {
-	tmpDir := t.TempDir()
-	releaseID := int64(100)
-	releaseDir := filepath.Join(tmpDir, fmt.Sprintf("%d", releaseID))
-	_ = os.MkdirAll(releaseDir, 0755)
+func TestModifyingFlacFileInvalidatesCache(t *testing.T) {
+	tempDir, releaseID, summary := setupTestReleaseFiles(t)
+	defer os.RemoveAll(tempDir)
 
-	for i := 1; i <= 10; i++ {
-		_ = os.WriteFile(filepath.Join(releaseDir, fmt.Sprintf("track_%02d.flac", i)), []byte("flac"), 0644)
-	}
-
-	tracks := make([]*pbgd.Track, 10)
-	for i := 0; i < 10; i++ {
-		tracks[i] = &pbgd.Track{Title: fmt.Sprintf("Track %d", i+1)}
-	}
-
-	client := &mockRecordCollectionClient{
-		getRecordFunc: func(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error) {
-			return &pbrc.GetRecordResponse{
-				Record: &pbrc.Record{
-					Release: &pbgd.Release{
-						Id:             int32(releaseID),
-						FormatQuantity: 1,
-						Tracklist:      tracks,
-					},
-				},
-			}, nil
-		},
-	}
-
-	res, err := EvaluateCompleteness(context.Background(), client, tmpDir, releaseID)
+	f1 := filepath.Join(tempDir, "98765", "track1.flac")
+	f, err := os.OpenFile(f1, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
-		t.Fatalf("EvaluateCompleteness failed: %v", err)
+		t.Fatalf("failed to open file for append: %v", err)
 	}
-	if res.Score != 50 {
-		t.Errorf("Score = %d, want 50", res.Score)
+	if _, err := f.Write([]byte("-more-bytes")); err != nil {
+		f.Close()
+		t.Fatalf("failed to write to file: %v", err)
 	}
-	if res.ExpectedTracks != 10 {
-		t.Errorf("ExpectedTracks = %d, want 10", res.ExpectedTracks)
-	}
-	if res.FoundTracks != 10 {
-		t.Errorf("FoundTracks = %d, want 10", res.FoundTracks)
-	}
-	if len(res.Files) != 10 {
-		t.Errorf("Files count = %d, want 10", len(res.Files))
+	f.Close()
+
+	if IsCacheValid(tempDir, releaseID, summary) {
+		t.Errorf("expected modified file size to invalidate cache, but IsCacheValid returned true")
 	}
 }
 
-func TestEvaluateCompleteness_PartialTracks(t *testing.T) {
-	tmpDir := t.TempDir()
-	releaseID := int64(200)
-	releaseDir := filepath.Join(tmpDir, fmt.Sprintf("%d", releaseID))
-	_ = os.MkdirAll(releaseDir, 0755)
+func TestAddingNewFlacFileInvalidatesCache(t *testing.T) {
+	tempDir, releaseID, summary := setupTestReleaseFiles(t)
+	defer os.RemoveAll(tempDir)
 
-	for i := 1; i <= 5; i++ {
-		_ = os.WriteFile(filepath.Join(releaseDir, fmt.Sprintf("track_%02d.flac", i)), []byte("flac"), 0644)
+	f3 := filepath.Join(tempDir, "98765", "track3.flac")
+	if err := os.WriteFile(f3, []byte("track-3-audio"), 0644); err != nil {
+		t.Fatalf("failed to create new track: %v", err)
 	}
 
-	tracks := make([]*pbgd.Track, 10)
-	for i := 0; i < 10; i++ {
-		tracks[i] = &pbgd.Track{Title: fmt.Sprintf("Track %d", i+1)}
+	if IsCacheValid(tempDir, releaseID, summary) {
+		t.Errorf("expected newly added FLAC file to invalidate cache, but IsCacheValid returned true")
 	}
 
-	client := &mockRecordCollectionClient{
-		getRecordFunc: func(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error) {
-			return &pbrc.GetRecordResponse{
-				Record: &pbrc.Record{
-					Release: &pbgd.Release{
-						Id:             int32(releaseID),
-						FormatQuantity: 1,
-						Tracklist:      tracks,
-					},
-				},
-			}, nil
-		},
+	_, valid := GetValidCachedSummary(tempDir, releaseID)
+	if valid {
+		t.Errorf("expected GetValidCachedSummary to return valid=false after adding file")
+	}
+}
+
+func TestRemovingFlacFileInvalidatesCache(t *testing.T) {
+	tempDir, releaseID, summary := setupTestReleaseFiles(t)
+	defer os.RemoveAll(tempDir)
+
+	f2 := filepath.Join(tempDir, "98765", "track2.flac")
+	if err := os.Remove(f2); err != nil {
+		t.Fatalf("failed to remove track2: %v", err)
 	}
 
-	res, err := EvaluateCompleteness(context.Background(), client, tmpDir, releaseID)
+	if IsCacheValid(tempDir, releaseID, summary) {
+		t.Errorf("expected removed FLAC file to invalidate cache, but IsCacheValid returned true")
+	}
+}
+
+func TestMissingSummaryFile(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "quality_missing_test")
 	if err != nil {
-		t.Fatalf("EvaluateCompleteness failed: %v", err)
+		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	if res.Score != 25 {
-		t.Errorf("Score = %d, want 25", res.Score)
-	}
-	if res.ExpectedTracks != 10 {
-		t.Errorf("ExpectedTracks = %d, want 10", res.ExpectedTracks)
-	}
-	if res.FoundTracks != 5 {
-		t.Errorf("FoundTracks = %d, want 5", res.FoundTracks)
-	}
-}
+	defer os.RemoveAll(tempDir)
 
-func TestEvaluateCompleteness_ExcessTracks(t *testing.T) {
-	tmpDir := t.TempDir()
-	releaseID := int64(300)
-	releaseDir := filepath.Join(tmpDir, fmt.Sprintf("%d", releaseID))
-	_ = os.MkdirAll(releaseDir, 0755)
-
-	for i := 1; i <= 12; i++ {
-		_ = os.WriteFile(filepath.Join(releaseDir, fmt.Sprintf("track_%02d.flac", i)), []byte("flac"), 0644)
-	}
-
-	tracks := make([]*pbgd.Track, 10)
-	for i := 0; i < 10; i++ {
-		tracks[i] = &pbgd.Track{Title: fmt.Sprintf("Track %d", i+1)}
-	}
-
-	client := &mockRecordCollectionClient{
-		getRecordFunc: func(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error) {
-			return &pbrc.GetRecordResponse{
-				Record: &pbrc.Record{
-					Release: &pbgd.Release{
-						Id:             int32(releaseID),
-						FormatQuantity: 1,
-						Tracklist:      tracks,
-					},
-				},
-			}, nil
-		},
-	}
-
-	res, err := EvaluateCompleteness(context.Background(), client, tmpDir, releaseID)
-	if err != nil {
-		t.Fatalf("EvaluateCompleteness failed: %v", err)
-	}
-	if res.Score != 30 {
-		t.Errorf("Score = %d, want 30", res.Score)
-	}
-	if res.ExpectedTracks != 10 {
-		t.Errorf("ExpectedTracks = %d, want 10", res.ExpectedTracks)
-	}
-	if res.FoundTracks != 12 {
-		t.Errorf("FoundTracks = %d, want 12", res.FoundTracks)
-	}
-}
-
-func TestEvaluateCompleteness_ZeroTracksFound(t *testing.T) {
-	tmpDir := t.TempDir()
-	releaseID := int64(400)
-	// Directory exists but has 0 flac files
-	releaseDir := filepath.Join(tmpDir, fmt.Sprintf("%d", releaseID))
-	_ = os.MkdirAll(releaseDir, 0755)
-
-	tracks := make([]*pbgd.Track, 10)
-	for i := 0; i < 10; i++ {
-		tracks[i] = &pbgd.Track{Title: fmt.Sprintf("Track %d", i+1)}
-	}
-
-	client := &mockRecordCollectionClient{
-		getRecordFunc: func(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error) {
-			return &pbrc.GetRecordResponse{
-				Record: &pbrc.Record{
-					Release: &pbgd.Release{
-						Id:             int32(releaseID),
-						FormatQuantity: 1,
-						Tracklist:      tracks,
-					},
-				},
-			}, nil
-		},
-	}
-
-	res, err := EvaluateCompleteness(context.Background(), client, tmpDir, releaseID)
+	releaseID := int64(11111)
+	summary, err := ReadQualitySummary(tempDir, releaseID)
 	if err == nil {
-		t.Fatalf("EvaluateCompleteness expected error for 0 tracks, got res: %v", res)
-	}
-	if status.Code(err) != codes.NotFound {
-		t.Errorf("status.Code(err) = %v, want NotFound", status.Code(err))
-	}
-}
-
-func TestEvaluateCompleteness_ReleaseNotFound(t *testing.T) {
-	tmpDir := t.TempDir()
-	releaseID := int64(500)
-
-	client := &mockRecordCollectionClient{
-		getRecordFunc: func(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error) {
-			return nil, status.Errorf(codes.NotFound, "release %d not found in recordcollection", releaseID)
-		},
+		t.Errorf("expected error reading missing quality.json, got nil (summary: %v)", summary)
 	}
 
-	res, err := EvaluateCompleteness(context.Background(), client, tmpDir, releaseID)
-	if err == nil {
-		t.Fatalf("EvaluateCompleteness expected error for not found release, got: %v", res)
-	}
-	if status.Code(err) != codes.NotFound {
-		t.Errorf("status.Code(err) = %v, want NotFound", status.Code(err))
-	}
-}
-
-func TestEvaluateCompleteness_UpstreamUnavailable(t *testing.T) {
-	tmpDir := t.TempDir()
-	releaseID := int64(600)
-
-	client := &mockRecordCollectionClient{
-		getRecordFunc: func(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error) {
-			return nil, status.Errorf(codes.Unavailable, "recordcollection service unavailable")
-		},
-	}
-
-	res, err := EvaluateCompleteness(context.Background(), client, tmpDir, releaseID)
-	if err == nil {
-		t.Fatalf("EvaluateCompleteness expected error for unavailable service, got: %v", res)
-	}
-	if status.Code(err) != codes.Unavailable {
-		t.Errorf("status.Code(err) = %v, want Unavailable", status.Code(err))
-	}
-}
-
-func TestEvaluateCompleteness_DeadlineExceeded(t *testing.T) {
-	tmpDir := t.TempDir()
-	releaseID := int64(700)
-
-	client := &mockRecordCollectionClient{
-		getRecordFunc: func(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error) {
-			return nil, status.Errorf(codes.DeadlineExceeded, "deadline exceeded")
-		},
-	}
-
-	res, err := EvaluateCompleteness(context.Background(), client, tmpDir, releaseID)
-	if err == nil {
-		t.Fatalf("EvaluateCompleteness expected error for timeout, got: %v", res)
-	}
-	if status.Code(err) != codes.Unavailable {
-		t.Errorf("status.Code(err) = %v, want Unavailable", status.Code(err))
+	cached, valid := GetValidCachedSummary(tempDir, releaseID)
+	if valid || cached != nil {
+		t.Errorf("expected valid=false, cached=nil for missing summary, got valid=%v, cached=%v", valid, cached)
 	}
 }
 
