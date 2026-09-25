@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -442,7 +443,7 @@ func TestScoringCleanAudio(t *testing.T) {
 		RmsDb:        -18.0,
 		ClippedCount: 0,
 	}
-	score := CalculateTrackCleanliness(stats)
+	score := CalculateTrackCleanliness(stats, false)
 	if score < 45 || score > 50 {
 		t.Errorf("expected high score (~50) for clean audio, got %v", score)
 	}
@@ -454,14 +455,14 @@ func TestScoringClippedAudio(t *testing.T) {
 		RmsDb:        -18.0,
 		ClippedCount: 0,
 	}
-	cleanScore := CalculateTrackCleanliness(cleanStats)
+	cleanScore := CalculateTrackCleanliness(cleanStats, false)
 
 	clippedStats := &SoxStats{
 		PeakDb:       0.0,
 		RmsDb:        -18.0,
 		ClippedCount: 5000,
 	}
-	clippedScore := CalculateTrackCleanliness(clippedStats)
+	clippedScore := CalculateTrackCleanliness(clippedStats, false)
 
 	if clippedScore >= cleanScore {
 		t.Errorf("expected clipped audio score (%v) to be less than clean score (%v)", clippedScore, cleanScore)
@@ -477,14 +478,14 @@ func TestScoringElevatedNoiseFloor(t *testing.T) {
 		RmsDb:        -20.0, // Dynamic range 18dB
 		ClippedCount: 0,
 	}
-	cleanScore := CalculateTrackCleanliness(cleanStats)
+	cleanScore := CalculateTrackCleanliness(cleanStats, false)
 
 	noisyStats := &SoxStats{
 		PeakDb:       -2.0,
 		RmsDb:        -5.0, // Dynamic range only 3dB (elevated noise floor)
 		ClippedCount: 0,
 	}
-	noisyScore := CalculateTrackCleanliness(noisyStats)
+	noisyScore := CalculateTrackCleanliness(noisyStats, false)
 
 	if noisyScore >= cleanScore {
 		t.Errorf("expected noisy audio score (%v) to be less than clean score (%v)", noisyScore, cleanScore)
@@ -937,3 +938,158 @@ func TestQualityServerGetQualityErrors(t *testing.T) {
 		t.Errorf("expected NotFound when no FLAC files found on disk, got %v", err)
 	}
 }
+
+func TestCalculateTrackCleanliness(t *testing.T) {
+	// Nil stats returns 0
+	if score := CalculateTrackCleanliness(nil, false); score != 0 {
+		t.Errorf("expected score 0 for nil stats, got %d", score)
+	}
+
+	t.Run("DynamicRangeDeductions", func(t *testing.T) {
+		tests := []struct {
+			name           string
+			peakDb         float64
+			rmsDb          float64
+			expectedScore  int32
+			expectedDeduct int32
+		}{
+			{
+				name:           "dynamicRange >= 15.0 dB (no deduction)",
+				peakDb:         -1.0,
+				rmsDb:          -16.0, // DR = 15.0
+				expectedScore:  50,
+				expectedDeduct: 0,
+			},
+			{
+				name:           "dynamicRange > 15.0 dB (no deduction)",
+				peakDb:         -1.0,
+				rmsDb:          -20.0, // DR = 19.0
+				expectedScore:  50,
+				expectedDeduct: 0,
+			},
+			{
+				name:           "dynamicRange == 14.0 dB (5 pt minimum deduction)",
+				peakDb:         -1.0,
+				rmsDb:          -15.0, // DR = 14.0, (15-14)*2 = 2 clamped to 5
+				expectedScore:  45,
+				expectedDeduct: 5,
+			},
+			{
+				name:           "dynamicRange == 10.0 dB (10 pt deduction)",
+				peakDb:         -1.0,
+				rmsDb:          -11.0, // DR = 10.0, (15-10)*2 = 10
+				expectedScore:  40,
+				expectedDeduct: 10,
+			},
+			{
+				name:           "dynamicRange == 4.0 dB (20 pt maximum deduction)",
+				peakDb:         -1.0,
+				rmsDb:          -5.0, // DR = 4.0, (15-4)*2 = 22 clamped to 20
+				expectedScore:  30,
+				expectedDeduct: 20,
+			},
+			{
+				name:           "dynamicRange <= 0.0 dB (20 pt maximum deduction)",
+				peakDb:         -1.0,
+				rmsDb:          -1.0, // DR = 0.0, (15-0)*2 = 30 clamped to 20
+				expectedScore:  30,
+				expectedDeduct: 20,
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				stats := &SoxStats{
+					PeakDb:       tc.peakDb,
+					RmsDb:        tc.rmsDb,
+					ClippedCount: 0,
+				}
+				score := CalculateTrackCleanliness(stats, false)
+				if score != tc.expectedScore {
+					t.Errorf("expected score %d (deduction %d), got %d", tc.expectedScore, tc.expectedDeduct, score)
+				}
+			})
+		}
+	})
+
+	t.Run("SilencePenalty", func(t *testing.T) {
+		statsClean := &SoxStats{
+			PeakDb:       -1.0,
+			RmsDb:        -17.0, // DR = 16.0, no DR deduction
+			ClippedCount: 0,
+		}
+
+		// hasLongSilence == false: 0 deduction
+		scoreNoSilence := CalculateTrackCleanliness(statsClean, false)
+		if scoreNoSilence != 50 {
+			t.Errorf("expected score 50 when hasLongSilence is false, got %d", scoreNoSilence)
+		}
+
+		// hasLongSilence == true: deducts 10 points
+		scoreSilence := CalculateTrackCleanliness(statsClean, true)
+		if scoreSilence != 40 {
+			t.Errorf("expected score 40 when hasLongSilence is true, got %d", scoreSilence)
+		}
+	})
+
+	t.Run("PureSilenceTrackPenalty", func(t *testing.T) {
+		// Pure silence (PeakDb <= -100 or -inf)
+		// Combines max dynamic range deduction (20) and silence penalty (10)
+		// Base: 50 - 20 (max DR) - 10 (silence) = 20
+		statsPureSilence1 := &SoxStats{
+			PeakDb:       -100.0,
+			RmsDb:        -100.0,
+			ClippedCount: 0,
+		}
+		score1 := CalculateTrackCleanliness(statsPureSilence1, true)
+		if score1 != 20 {
+			t.Errorf("expected score 20 for pure silence with long silence, got %d", score1)
+		}
+
+		statsPureSilenceInf := &SoxStats{
+			PeakDb:       math.Inf(-1),
+			RmsDb:        math.Inf(-1),
+			ClippedCount: 0,
+		}
+		scoreInf := CalculateTrackCleanliness(statsPureSilenceInf, true)
+		if scoreInf != 20 {
+			t.Errorf("expected score 20 for -inf pure silence with long silence, got %d", scoreInf)
+		}
+
+		// Pure silence without long silence flag: 50 - 20 = 30
+		scoreNoSilenceFlag := CalculateTrackCleanliness(statsPureSilence1, false)
+		if scoreNoSilenceFlag != 30 {
+			t.Errorf("expected score 30 for pure silence without long silence flag, got %d", scoreNoSilenceFlag)
+		}
+	})
+
+	t.Run("ScoreClamping", func(t *testing.T) {
+		// Test lower bound clamping to 0:
+		// Base: 50
+		// Severe clipping: -15 (Pk >= -0.01 && ClippedCount > 0), -15 (ClippedCount >= 15000)
+		// Dynamic range deduction: -20
+		// Long silence: -10
+		// Total deductions: 15 + 15 + 20 + 10 = 60 => score -10, clamped to 0
+		statsSevere := &SoxStats{
+			PeakDb:       0.0,
+			RmsDb:        0.0,
+			ClippedCount: 20000,
+		}
+		scoreClampedZero := CalculateTrackCleanliness(statsSevere, true)
+		if scoreClampedZero != 0 {
+			t.Errorf("expected clamped score 0, got %d", scoreClampedZero)
+		}
+
+		// Test upper bound clamping to 50:
+		statsClean := &SoxStats{
+			PeakDb:       -1.0,
+			RmsDb:        -20.0,
+			ClippedCount: 0,
+		}
+		scoreClampedMax := CalculateTrackCleanliness(statsClean, false)
+		if scoreClampedMax != 50 {
+			t.Errorf("expected clamped score 50, got %d", scoreClampedMax)
+		}
+	})
+}
+
