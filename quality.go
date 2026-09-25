@@ -22,21 +22,27 @@ import (
 	pb "github.com/brotherlogic/recorder/proto"
 )
 
+// CurrentScoringVersion defines the current scoring algorithm version.
+const CurrentScoringVersion = 2
+
 // TrackQuality represents the audio quality analysis metrics for an individual track.
 type TrackQuality struct {
-	Filename     string    `json:"filename"`
-	SizeBytes    int64     `json:"size_bytes"`
-	ModTime      time.Time `json:"mod_time"`
-	PeakDb       float64   `json:"peak_db"`
-	RmsDb        float64   `json:"rms_db"`
-	ClippedCount int64     `json:"clipped_count"`
-	Score        int32     `json:"score"` // 0 - 50
+	Filename       string    `json:"filename"`
+	SizeBytes      int64     `json:"size_bytes"`
+	ModTime        time.Time `json:"mod_time"`
+	PeakDb         float64   `json:"peak_db"`
+	RmsDb          float64   `json:"rms_db"`
+	ClippedCount   int64     `json:"clipped_count"`
+	DynamicRange   float64   `json:"dynamic_range"`
+	HasLongSilence bool      `json:"has_long_silence"`
+	Score          int32     `json:"score"` // 0 - 50
 }
 
 // QualitySummary represents the composite evaluation and per-track breakdown for a release.
 type QualitySummary struct {
 	ReleaseID         int64                   `json:"release_id"`
-	Score             int32                   `json:"score"` // 0 - 100
+	Version           int                     `json:"version"`
+	Score             int32                   `json:"score"`              // 0 - 100
 	CompletenessScore int32                   `json:"completeness_score"` // 0 - 50
 	CleanlinessScore  int32                   `json:"cleanliness_score"`  // 0 - 50
 	ExpectedTracks    int                     `json:"expected_tracks"`
@@ -101,6 +107,10 @@ func WriteQualitySummary(saveDir string, releaseID int64, summary *QualitySummar
 // If files are missing, added, or timestamps/sizes have changed, cache is marked invalid.
 func IsCacheValid(saveDir string, releaseID int64, summary *QualitySummary) bool {
 	if summary == nil || summary.Tracks == nil {
+		return false
+	}
+
+	if summary.Version < CurrentScoringVersion {
 		return false
 	}
 
@@ -485,6 +495,7 @@ func (s *QualityServer) GetQuality(ctx context.Context, req *pb.GetQualityReques
 
 	summary := &QualitySummary{
 		ReleaseID:         releaseID,
+		Version:           CurrentScoringVersion,
 		Score:             totalScore,
 		CompletenessScore: completenessRes.Score,
 		CleanlinessScore:  cleanlinessScore,

@@ -32,6 +32,7 @@ func TestQualitySummarySerialization(t *testing.T) {
 
 	original := &QualitySummary{
 		ReleaseID:         releaseID,
+		Version:           CurrentScoringVersion,
 		Score:             85,
 		CompletenessScore: 45,
 		CleanlinessScore:  40,
@@ -40,22 +41,26 @@ func TestQualitySummarySerialization(t *testing.T) {
 		LastEvaluated:     now,
 		Tracks: map[string]TrackQuality{
 			"track1.flac": {
-				Filename:     "track1.flac",
-				SizeBytes:    1024,
-				ModTime:      now,
-				PeakDb:       -1.5,
-				RmsDb:        -14.2,
-				ClippedCount: 0,
-				Score:        40,
+				Filename:       "track1.flac",
+				SizeBytes:      1024,
+				ModTime:        now,
+				PeakDb:         -1.5,
+				RmsDb:          -14.2,
+				ClippedCount:   0,
+				DynamicRange:   12.7,
+				HasLongSilence: false,
+				Score:          40,
 			},
 			"track2.flac": {
-				Filename:     "track2.flac",
-				SizeBytes:    2048,
-				ModTime:      now,
-				PeakDb:       -2.0,
-				RmsDb:        -15.0,
-				ClippedCount: 1,
-				Score:        38,
+				Filename:       "track2.flac",
+				SizeBytes:      2048,
+				ModTime:        now,
+				PeakDb:         -2.0,
+				RmsDb:          -15.0,
+				ClippedCount:   1,
+				DynamicRange:   13.0,
+				HasLongSilence: true,
+				Score:          38,
 			},
 		},
 	}
@@ -81,6 +86,9 @@ func TestQualitySummarySerialization(t *testing.T) {
 
 	if loaded.ReleaseID != original.ReleaseID {
 		t.Errorf("ReleaseID mismatch: got %v, want %v", loaded.ReleaseID, original.ReleaseID)
+	}
+	if loaded.Version != original.Version {
+		t.Errorf("Version mismatch: got %v, want %v", loaded.Version, original.Version)
 	}
 	if loaded.Score != original.Score {
 		t.Errorf("Score mismatch: got %v, want %v", loaded.Score, original.Score)
@@ -125,9 +133,38 @@ func TestQualitySummarySerialization(t *testing.T) {
 		if loadedTrack.ClippedCount != origTrack.ClippedCount {
 			t.Errorf("track %v ClippedCount mismatch: got %v, want %v", k, loadedTrack.ClippedCount, origTrack.ClippedCount)
 		}
+		if loadedTrack.DynamicRange != origTrack.DynamicRange {
+			t.Errorf("track %v DynamicRange mismatch: got %v, want %v", k, loadedTrack.DynamicRange, origTrack.DynamicRange)
+		}
+		if loadedTrack.HasLongSilence != origTrack.HasLongSilence {
+			t.Errorf("track %v HasLongSilence mismatch: got %v, want %v", k, loadedTrack.HasLongSilence, origTrack.HasLongSilence)
+		}
 		if loadedTrack.Score != origTrack.Score {
 			t.Errorf("track %v Score mismatch: got %v, want %v", k, loadedTrack.Score, origTrack.Score)
 		}
+	}
+}
+
+func TestQualitySummaryCacheVersioning(t *testing.T) {
+	tempDir, releaseID, summary := setupTestReleaseFiles(t)
+	defer os.RemoveAll(tempDir)
+
+	// Verify IsCacheValid returns false when summary.Version is 0
+	summary.Version = 0
+	if IsCacheValid(tempDir, releaseID, summary) {
+		t.Errorf("expected IsCacheValid to return false when summary.Version is 0, got true")
+	}
+
+	// Verify IsCacheValid returns false when summary.Version is 1
+	summary.Version = 1
+	if IsCacheValid(tempDir, releaseID, summary) {
+		t.Errorf("expected IsCacheValid to return false when summary.Version is 1, got true")
+	}
+
+	// Verify IsCacheValid returns true when summary.Version == CurrentScoringVersion and file modification times/sizes match
+	summary.Version = CurrentScoringVersion
+	if !IsCacheValid(tempDir, releaseID, summary) {
+		t.Errorf("expected IsCacheValid to return true when summary.Version is CurrentScoringVersion (%d), got false", CurrentScoringVersion)
 	}
 }
 
@@ -164,6 +201,7 @@ func setupTestReleaseFiles(t *testing.T) (string, int64, *QualitySummary) {
 
 	summary := &QualitySummary{
 		ReleaseID:         releaseID,
+		Version:           CurrentScoringVersion,
 		Score:             90,
 		CompletenessScore: 50,
 		CleanlinessScore:  40,
@@ -619,6 +657,7 @@ func TestQualityServerGetQualityCacheHit(t *testing.T) {
 
 	summary := &QualitySummary{
 		ReleaseID:         releaseID,
+		Version:           CurrentScoringVersion,
 		Score:             92,
 		CompletenessScore: 50,
 		CleanlinessScore:  42,
@@ -710,6 +749,9 @@ func TestQualityServerGetQualityEvaluation(t *testing.T) {
 	savedSummary, err := ReadQualitySummary(tempDir, releaseID)
 	if err != nil {
 		t.Fatalf("failed to read persisted quality.json: %v", err)
+	}
+	if savedSummary.Version != CurrentScoringVersion {
+		t.Errorf("saved version mismatch: got %d, want %d", savedSummary.Version, CurrentScoringVersion)
 	}
 	if savedSummary.Score != resp.GetScore() {
 		t.Errorf("saved score mismatch: got %d, want %d", savedSummary.Score, resp.GetScore())
