@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -11,7 +12,14 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	pbrc "github.com/brotherlogic/recordcollection/proto"
+	pb "github.com/brotherlogic/recorder/proto"
 )
 
 // TrackQuality represents the audio quality analysis metrics for an individual track.
@@ -380,4 +388,115 @@ func CalculateAggregateCleanlinessFromMap(tracks map[string]TrackQuality) int32 
 		avg = 50
 	}
 	return avg
+}
+
+// KeyedMutex provides thread-safe per-release concurrency locking.
+type KeyedMutex struct {
+	locks sync.Map
+}
+
+// GetLock returns the *sync.RWMutex for a specific release ID.
+func (m *KeyedMutex) GetLock(releaseID int64) *sync.RWMutex {
+	val, _ := m.locks.LoadOrStore(releaseID, &sync.RWMutex{})
+	return val.(*sync.RWMutex)
+}
+
+// QualityServer implements pb.QualityServiceServer.
+type QualityServer struct {
+	pb.UnimplementedQualityServiceServer
+	saveDir  string
+	mutex    *KeyedMutex
+	rcClient pbrc.RecordCollectionServiceClient
+	mu       sync.Mutex
+}
+
+// NewQualityServer creates a new QualityServer instance.
+func NewQualityServer(saveDir string, rcClient pbrc.RecordCollectionServiceClient) *QualityServer {
+	return &QualityServer{
+		saveDir:  saveDir,
+		mutex:    &KeyedMutex{},
+		rcClient: rcClient,
+	}
+}
+
+func (s *QualityServer) getSaveDir() string {
+	if s.saveDir != "" {
+		return s.saveDir
+	}
+	if saveDir != nil {
+		return *saveDir
+	}
+	return ""
+}
+
+func (s *QualityServer) getLock(releaseID int64) *sync.RWMutex {
+	s.mu.Lock()
+	if s.mutex == nil {
+		s.mutex = &KeyedMutex{}
+	}
+	s.mu.Unlock()
+	return s.mutex.GetLock(releaseID)
+}
+
+// GetQuality handles quality evaluation requests.
+func (s *QualityServer) GetQuality(ctx context.Context, req *pb.GetQualityRequest) (*pb.GetQualityResponse, error) {
+	if req == nil || req.GetReleaseId() <= 0 {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid release id: %d", req.GetReleaseId())
+	}
+
+	releaseID := req.GetReleaseId()
+	lock := s.getLock(releaseID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	dir := s.getSaveDir()
+
+	// 1. Check quality.json disk cache; return cached score immediately on cache hit.
+	if cached, ok := GetValidCachedSummary(dir, releaseID); ok && cached != nil {
+		return &pb.GetQualityResponse{Score: cached.Score}, nil
+	}
+
+	// 2. On cache miss or invalidated cache:
+	// Compute completeness score (0-50).
+	completenessRes, err := EvaluateCompleteness(ctx, s.rcClient, dir, releaseID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Compute cleanliness score (0-50).
+	tracksMap := make(map[string]TrackQuality)
+	for _, file := range completenessRes.Files {
+		tq, err := AnalyzeTrack(file)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to analyze track %s: %v", file, err)
+		}
+		tq.Filename = filepath.Base(file)
+		tracksMap[filepath.Base(file)] = *tq
+	}
+	cleanlinessScore := CalculateAggregateCleanlinessFromMap(tracksMap)
+
+	// Calculate composite score: TotalScore = CompletenessScore + CleanlinessScore (clamped strictly 0 to 100).
+	totalScore := completenessRes.Score + cleanlinessScore
+	if totalScore < 0 {
+		totalScore = 0
+	} else if totalScore > 100 {
+		totalScore = 100
+	}
+
+	summary := &QualitySummary{
+		ReleaseID:         releaseID,
+		Score:             totalScore,
+		CompletenessScore: completenessRes.Score,
+		CleanlinessScore:  cleanlinessScore,
+		ExpectedTracks:    completenessRes.ExpectedTracks,
+		FoundTracks:       completenessRes.FoundTracks,
+		Tracks:            tracksMap,
+		LastEvaluated:     time.Now().UTC(),
+	}
+
+	if err := WriteQualitySummary(dir, releaseID, summary); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to write quality summary: %v", err)
+	}
+
+	return &pb.GetQualityResponse{Score: totalScore}, nil
 }

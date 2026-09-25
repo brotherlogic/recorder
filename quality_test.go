@@ -1,11 +1,23 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	pbgd "github.com/brotherlogic/godiscogs/proto"
+	pbrc "github.com/brotherlogic/recordcollection/proto"
+	pb "github.com/brotherlogic/recorder/proto"
 )
 
 func TestQualitySummarySerialization(t *testing.T) {
@@ -551,5 +563,335 @@ func TestAnalyzeTrackRealAudio(t *testing.T) {
 	}
 	if missingRes.Score != 0 {
 		t.Errorf("expected score 0 for missing file, got %v", missingRes.Score)
+	}
+}
+
+type mockRecordCollectionClient struct {
+	pbrc.RecordCollectionServiceClient
+	getRecordFunc func(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error)
+}
+
+func (m *mockRecordCollectionClient) GetRecord(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error) {
+	if m.getRecordFunc != nil {
+		return m.getRecordFunc(ctx, in, opts...)
+	}
+	return nil, status.Errorf(codes.NotFound, "not found")
+}
+
+func TestKeyedMutex(t *testing.T) {
+	km := &KeyedMutex{}
+	lock1 := km.GetLock(123)
+	if lock1 == nil {
+		t.Fatalf("expected non-nil lock for release 123")
+	}
+
+	lock1Again := km.GetLock(123)
+	if lock1 != lock1Again {
+		t.Fatalf("expected identical lock instance for the same release ID")
+	}
+
+	lock2 := km.GetLock(456)
+	if lock2 == nil {
+		t.Fatalf("expected non-nil lock for release 456")
+	}
+	if lock1 == lock2 {
+		t.Fatalf("expected distinct lock instances for different release IDs")
+	}
+}
+
+func TestQualityServerGetQualityCacheHit(t *testing.T) {
+	tempDir := t.TempDir()
+	releaseID := int64(1001)
+
+	// Create dummy FLAC file
+	relDir := filepath.Join(tempDir, fmt.Sprintf("%d", releaseID))
+	if err := os.MkdirAll(relDir, 0755); err != nil {
+		t.Fatalf("failed to create release dir: %v", err)
+	}
+	flacPath := filepath.Join(relDir, "1001_track_001.flac")
+	if err := os.WriteFile(flacPath, []byte("fake flac data"), 0644); err != nil {
+		t.Fatalf("failed to write flac: %v", err)
+	}
+	info, err := os.Stat(flacPath)
+	if err != nil {
+		t.Fatalf("failed to stat flac: %v", err)
+	}
+
+	summary := &QualitySummary{
+		ReleaseID:         releaseID,
+		Score:             92,
+		CompletenessScore: 50,
+		CleanlinessScore:  42,
+		ExpectedTracks:    1,
+		FoundTracks:       1,
+		LastEvaluated:     time.Now().UTC(),
+		Tracks: map[string]TrackQuality{
+			"1001_track_001.flac": {
+				Filename:  "1001_track_001.flac",
+				SizeBytes: info.Size(),
+				ModTime:   info.ModTime(),
+				Score:     42,
+			},
+		},
+	}
+	if err := WriteQualitySummary(tempDir, releaseID, summary); err != nil {
+		t.Fatalf("failed to write summary: %v", err)
+	}
+
+	// rcClient should not be called on cache hit
+	mockClient := &mockRecordCollectionClient{
+		getRecordFunc: func(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error) {
+			t.Fatalf("rcClient.GetRecord should not be invoked on cache hit")
+			return nil, status.Errorf(codes.Internal, "unexpected call")
+		},
+	}
+
+	server := NewQualityServer(tempDir, mockClient)
+	resp, err := server.GetQuality(context.Background(), &pb.GetQualityRequest{ReleaseId: releaseID})
+	if err != nil {
+		t.Fatalf("GetQuality returned unexpected error: %v", err)
+	}
+	if resp.GetScore() != 92 {
+		t.Errorf("expected cached score 92, got %d", resp.GetScore())
+	}
+}
+
+func TestQualityServerGetQualityEvaluation(t *testing.T) {
+	tempDir := t.TempDir()
+	releaseID := int64(2002)
+
+	relDir := filepath.Join(tempDir, fmt.Sprintf("%d", releaseID))
+	if err := os.MkdirAll(relDir, 0755); err != nil {
+		t.Fatalf("failed to create release dir: %v", err)
+	}
+
+	// Create real FLAC audio file using sox
+	wavFile := filepath.Join(relDir, "temp.wav")
+	cmd := exec.Command("sox", "-n", "-r", "44100", "-c", "2", wavFile, "synth", "0.1", "sine", "1000", "vol", "-3dB")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to generate wav: %v", err)
+	}
+	flacPath := filepath.Join(relDir, "2002_track_001.flac")
+	cmdFlac := exec.Command("flac", "--best", wavFile, "-o", flacPath)
+	if err := cmdFlac.Run(); err != nil {
+		t.Fatalf("failed to convert flac: %v", err)
+	}
+	os.Remove(wavFile)
+
+	mockClient := &mockRecordCollectionClient{
+		getRecordFunc: func(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error) {
+			if in.GetReleaseId() != int32(releaseID) {
+				return nil, status.Errorf(codes.NotFound, "wrong release id")
+			}
+			return &pbrc.GetRecordResponse{
+				Record: &pbrc.Record{
+					Release: &pbgd.Release{
+						Id:             int32(releaseID),
+						FormatQuantity: 1,
+						Tracklist: []*pbgd.Track{
+							{Title: "Track 1", Position: "A1"},
+						},
+					},
+				},
+			}, nil
+		},
+	}
+
+	server := NewQualityServer(tempDir, mockClient)
+	resp, err := server.GetQuality(context.Background(), &pb.GetQualityRequest{ReleaseId: releaseID})
+	if err != nil {
+		t.Fatalf("GetQuality evaluation failed: %v", err)
+	}
+	if resp.GetScore() <= 0 || resp.GetScore() > 100 {
+		t.Errorf("expected score between 1 and 100, got %d", resp.GetScore())
+	}
+
+	// Verify quality.json was persisted
+	savedSummary, err := ReadQualitySummary(tempDir, releaseID)
+	if err != nil {
+		t.Fatalf("failed to read persisted quality.json: %v", err)
+	}
+	if savedSummary.Score != resp.GetScore() {
+		t.Errorf("saved score mismatch: got %d, want %d", savedSummary.Score, resp.GetScore())
+	}
+	if savedSummary.ExpectedTracks != 1 || savedSummary.FoundTracks != 1 {
+		t.Errorf("unexpected tracks count in summary: expected=%d found=%d", savedSummary.ExpectedTracks, savedSummary.FoundTracks)
+	}
+}
+
+func TestQualityServerGetQualityConcurrencySameRelease(t *testing.T) {
+	tempDir := t.TempDir()
+	releaseID := int64(3003)
+
+	relDir := filepath.Join(tempDir, fmt.Sprintf("%d", releaseID))
+	os.MkdirAll(relDir, 0755)
+	flacPath := filepath.Join(relDir, "3003_track_001.flac")
+	os.WriteFile(flacPath, []byte("data"), 0644)
+
+	var activeCalls int32
+	var maxConcurrentCalls int32
+
+	mockClient := &mockRecordCollectionClient{
+		getRecordFunc: func(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error) {
+			curr := atomic.AddInt32(&activeCalls, 1)
+			defer atomic.AddInt32(&activeCalls, -1)
+
+			for {
+				max := atomic.LoadInt32(&maxConcurrentCalls)
+				if curr <= max {
+					break
+				}
+				if atomic.CompareAndSwapInt32(&maxConcurrentCalls, max, curr) {
+					break
+				}
+			}
+
+			time.Sleep(50 * time.Millisecond)
+
+			return &pbrc.GetRecordResponse{
+				Record: &pbrc.Record{
+					Release: &pbgd.Release{
+						Id:             int32(releaseID),
+						FormatQuantity: 1,
+						Tracklist: []*pbgd.Track{
+							{Title: "Track 1", Position: "1"},
+						},
+					},
+				},
+			}, nil
+		},
+	}
+
+	server := NewQualityServer(tempDir, mockClient)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = server.GetQuality(context.Background(), &pb.GetQualityRequest{ReleaseId: releaseID})
+		}()
+	}
+	wg.Wait()
+
+	if maxConcurrentCalls > 1 {
+		t.Errorf("expected sequential execution for same release_id, but max concurrency was %d", maxConcurrentCalls)
+	}
+}
+
+func TestQualityServerGetQualityConcurrencyDistinctReleases(t *testing.T) {
+	tempDir := t.TempDir()
+	release1 := int64(4001)
+	release2 := int64(4002)
+
+	for _, rel := range []int64{release1, release2} {
+		relDir := filepath.Join(tempDir, fmt.Sprintf("%d", rel))
+		os.MkdirAll(relDir, 0755)
+		os.WriteFile(filepath.Join(relDir, fmt.Sprintf("%d_track_001.flac", rel)), []byte("data"), 0644)
+	}
+
+	startedRelease1 := make(chan struct{})
+	release1Block := make(chan struct{})
+
+	mockClient := &mockRecordCollectionClient{
+		getRecordFunc: func(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error) {
+			if in.GetReleaseId() == int32(release1) {
+				close(startedRelease1)
+				<-release1Block
+			}
+			return &pbrc.GetRecordResponse{
+				Record: &pbrc.Record{
+					Release: &pbgd.Release{
+						Id:             in.GetReleaseId(),
+						FormatQuantity: 1,
+						Tracklist: []*pbgd.Track{
+							{Title: "Track 1", Position: "1"},
+						},
+					},
+				},
+			}, nil
+		},
+	}
+
+	server := NewQualityServer(tempDir, mockClient)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = server.GetQuality(context.Background(), &pb.GetQualityRequest{ReleaseId: release1})
+	}()
+
+	select {
+	case <-startedRelease1:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("release 1 did not reach recordcollection client")
+	}
+
+	// Call release2 while release1 is blocked inside GetQuality
+	done2 := make(chan struct{})
+	go func() {
+		_, _ = server.GetQuality(context.Background(), &pb.GetQualityRequest{ReleaseId: release2})
+		close(done2)
+	}()
+
+	select {
+	case <-done2:
+		// release2 completed concurrently while release1 was blocked!
+	case <-time.After(2 * time.Second):
+		t.Fatalf("release 2 was blocked by release 1; distinct releases must execute concurrently")
+	}
+
+	close(release1Block)
+	wg.Wait()
+}
+
+func TestQualityServerGetQualityErrors(t *testing.T) {
+	tempDir := t.TempDir()
+
+	mockClient := &mockRecordCollectionClient{
+		getRecordFunc: func(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error) {
+			if in.GetReleaseId() == 9999 {
+				return nil, status.Errorf(codes.NotFound, "release 9999 not found")
+			}
+			return &pbrc.GetRecordResponse{
+				Record: &pbrc.Record{
+					Release: &pbgd.Release{
+						Id:             in.GetReleaseId(),
+						FormatQuantity: 1,
+						Tracklist: []*pbgd.Track{
+							{Title: "Track 1", Position: "1"},
+						},
+					},
+				},
+			}, nil
+		},
+	}
+
+	server := NewQualityServer(tempDir, mockClient)
+
+	// 1. Invalid release ID
+	_, err := server.GetQuality(context.Background(), &pb.GetQualityRequest{ReleaseId: 0})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("expected InvalidArgument for releaseId=0, got %v", err)
+	}
+
+	_, err = server.GetQuality(context.Background(), &pb.GetQualityRequest{ReleaseId: -5})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("expected InvalidArgument for releaseId=-5, got %v", err)
+	}
+
+	// 2. Release not found in recordcollection
+	_, err = server.GetQuality(context.Background(), &pb.GetQualityRequest{ReleaseId: 9999})
+	if status.Code(err) != codes.NotFound {
+		t.Errorf("expected NotFound when release not in recordcollection, got %v", err)
+	}
+
+	// 3. No FLAC tracks found on disk
+	releaseID := int64(8888)
+	// Directory empty
+	_, err = server.GetQuality(context.Background(), &pb.GetQualityRequest{ReleaseId: releaseID})
+	if status.Code(err) != codes.NotFound {
+		t.Errorf("expected NotFound when no FLAC files found on disk, got %v", err)
 	}
 }
