@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -413,5 +414,266 @@ func TestEvaluateCompleteness_DeadlineExceeded(t *testing.T) {
 	}
 	if status.Code(err) != codes.Unavailable {
 		t.Errorf("status.Code(err) = %v, want Unavailable", status.Code(err))
+	}
+}
+
+const cleanSoxStatsOutput = `
+             Overall     Left      Right
+DC offset   0.000000  0.000000  0.000000
+Min level  -0.704996 -0.704996 -0.704996
+Max level   0.704996  0.704996  0.704996
+Pk lev dB      -3.04     -3.04     -3.04
+RMS lev dB    -18.50    -18.50    -18.50
+RMS Pk dB     -18.00    -18.00    -18.00
+RMS Tr dB     -19.00    -19.00    -19.00
+Crest factor       -      1.41      1.41
+Flat factor     0.00      0.00      0.00
+Pk count         198       198       198
+Bit-depth      32/32     32/32     32/32
+Num samples    44.1k
+Length s       1.000
+Scale max   1.000000
+Window s       0.050
+`
+
+const clippedSoxStatsOutput = `
+sox WARN vol: vol clipped 46000 samples; decrease volume?
+             Overall     Left      Right
+DC offset   0.000002  0.000002  0.000002
+Min level  -1.000000 -1.000000 -1.000000
+Max level   1.000000  1.000000  1.000000
+Pk lev dB       0.00      0.00      0.00
+RMS lev dB     -0.24     -0.24     -0.24
+RMS Pk dB      -0.24     -0.24     -0.24
+RMS Tr dB      -0.27     -0.27     -0.27
+Crest factor       -      1.03      1.03
+Flat factor     0.34      0.34      0.34
+Pk count       20.2k     20.2k     20.2k
+Bit-depth      32/32     32/32     32/32
+Num samples    44.1k
+Length s       1.000
+Scale max   1.000000
+Window s       0.050
+`
+
+const abnormalNoiseFloorStatsOutput = `
+             Overall     Left      Right
+DC offset   0.000000  0.000000  0.000000
+Min level  -0.704996 -0.704996 -0.704996
+Max level   0.704996  0.704996  0.704996
+Pk lev dB      -2.00     -2.00     -2.00
+RMS lev dB     -5.50     -5.50     -5.50
+RMS Pk dB      -5.00     -5.00     -5.00
+RMS Tr dB      -6.00     -6.00     -6.00
+Crest factor       -      1.10      1.10
+Flat factor     0.00      0.00      0.00
+Pk count         198       198       198
+Bit-depth      32/32     32/32     32/32
+Num samples    44.1k
+Length s       1.000
+Scale max   1.000000
+Window s       0.050
+`
+
+func TestParseSoxStats(t *testing.T) {
+	// Clean audio parsing
+	stats, err := ParseSoxStats(cleanSoxStatsOutput)
+	if err != nil {
+		t.Fatalf("unexpected error parsing clean stats: %v", err)
+	}
+	if stats == nil {
+		t.Fatalf("expected non-nil stats")
+	}
+	if stats.PeakDb != -3.04 {
+		t.Errorf("expected PeakDb -3.04, got %v", stats.PeakDb)
+	}
+	if stats.RmsDb != -18.50 {
+		t.Errorf("expected RmsDb -18.50, got %v", stats.RmsDb)
+	}
+	if stats.ClippedCount != 0 {
+		t.Errorf("expected ClippedCount 0, got %v", stats.ClippedCount)
+	}
+
+	// Clipped audio parsing
+	clippedStats, err := ParseSoxStats(clippedSoxStatsOutput)
+	if err != nil {
+		t.Fatalf("unexpected error parsing clipped stats: %v", err)
+	}
+	if clippedStats.PeakDb != 0.00 {
+		t.Errorf("expected PeakDb 0.00, got %v", clippedStats.PeakDb)
+	}
+	if clippedStats.RmsDb != -0.24 {
+		t.Errorf("expected RmsDb -0.24, got %v", clippedStats.RmsDb)
+	}
+	if clippedStats.ClippedCount != 46000 {
+		t.Errorf("expected ClippedCount 46000, got %v", clippedStats.ClippedCount)
+	}
+}
+
+func TestScoringCleanAudio(t *testing.T) {
+	stats := &SoxStats{
+		PeakDb:       -3.0,
+		RmsDb:        -18.0,
+		ClippedCount: 0,
+	}
+	score := CalculateTrackCleanliness(stats)
+	if score < 45 || score > 50 {
+		t.Errorf("expected high score (~50) for clean audio, got %v", score)
+	}
+}
+
+func TestScoringClippedAudio(t *testing.T) {
+	cleanStats := &SoxStats{
+		PeakDb:       -2.0,
+		RmsDb:        -18.0,
+		ClippedCount: 0,
+	}
+	cleanScore := CalculateTrackCleanliness(cleanStats)
+
+	clippedStats := &SoxStats{
+		PeakDb:       0.0,
+		RmsDb:        -18.0,
+		ClippedCount: 5000,
+	}
+	clippedScore := CalculateTrackCleanliness(clippedStats)
+
+	if clippedScore >= cleanScore {
+		t.Errorf("expected clipped audio score (%v) to be less than clean score (%v)", clippedScore, cleanScore)
+	}
+	if cleanScore-clippedScore < 10 {
+		t.Errorf("expected significant deduction for severe clipping, deduction was %v", cleanScore-clippedScore)
+	}
+}
+
+func TestScoringElevatedNoiseFloor(t *testing.T) {
+	cleanStats := &SoxStats{
+		PeakDb:       -2.0,
+		RmsDb:        -20.0, // Dynamic range 18dB
+		ClippedCount: 0,
+	}
+	cleanScore := CalculateTrackCleanliness(cleanStats)
+
+	noisyStats := &SoxStats{
+		PeakDb:       -2.0,
+		RmsDb:        -5.0, // Dynamic range only 3dB (elevated noise floor)
+		ClippedCount: 0,
+	}
+	noisyScore := CalculateTrackCleanliness(noisyStats)
+
+	if noisyScore >= cleanScore {
+		t.Errorf("expected noisy audio score (%v) to be less than clean score (%v)", noisyScore, cleanScore)
+	}
+	if cleanScore-noisyScore < 5 {
+		t.Errorf("expected deduction for elevated noise floor, deduction was %v", cleanScore-noisyScore)
+	}
+}
+
+func TestAnalyzeTrackZeroByteFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	emptyFile := filepath.Join(tmpDir, "empty.flac")
+	err := os.WriteFile(emptyFile, []byte{}, 0644)
+	if err != nil {
+		t.Fatalf("failed to create empty file: %v", err)
+	}
+
+	res, err := AnalyzeTrack(emptyFile)
+	if err != nil {
+		t.Fatalf("unexpected error analyzing empty file: %v", err)
+	}
+	if res.Score != 0 {
+		t.Errorf("expected score 0 for 0-byte file, got %v", res.Score)
+	}
+}
+
+func TestAnalyzeTrackCorruptedFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	corruptedFile := filepath.Join(tmpDir, "corrupted.flac")
+	err := os.WriteFile(corruptedFile, []byte("NOT_A_VALID_FLAC_FILE_HEADER_GARBAGE"), 0644)
+	if err != nil {
+		t.Fatalf("failed to create corrupted file: %v", err)
+	}
+
+	res, err := AnalyzeTrack(corruptedFile)
+	if err != nil {
+		t.Fatalf("unexpected error analyzing corrupted file: %v", err)
+	}
+	if res.Score != 0 {
+		t.Errorf("expected score 0 for corrupted file, got %v", res.Score)
+	}
+}
+
+func TestCalculateAggregateCleanliness(t *testing.T) {
+	tracks := []TrackQuality{
+		{Score: 50},
+		{Score: 40},
+		{Score: 30},
+	}
+	agg := CalculateAggregateCleanliness(tracks)
+	if agg != 40 {
+		t.Errorf("expected average score of 40, got %v", agg)
+	}
+
+	emptyTracks := []TrackQuality{}
+	if CalculateAggregateCleanliness(emptyTracks) != 0 {
+		t.Errorf("expected 0 for empty tracklist")
+	}
+}
+
+func TestCalculateAggregateCleanlinessFromMap(t *testing.T) {
+	trackMap := map[string]TrackQuality{
+		"track1.flac": {Score: 48},
+		"track2.flac": {Score: 42},
+	}
+	agg := CalculateAggregateCleanlinessFromMap(trackMap)
+	if agg != 45 {
+		t.Errorf("expected average score of 45, got %v", agg)
+	}
+
+	emptyMap := map[string]TrackQuality{}
+	if CalculateAggregateCleanlinessFromMap(emptyMap) != 0 {
+		t.Errorf("expected 0 for empty track map")
+	}
+}
+
+func TestAnalyzeTrackRealAudio(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Clean audio (with healthy dynamic range)
+	cleanFile := filepath.Join(tmpDir, "clean.wav")
+	cmd := exec.Command("sox", "-n", "-r", "44100", "-c", "2", cleanFile, "synth", "0.1", "sine", "1000", "pad", "0", "1.0", "vol", "-3dB")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to create clean audio file: %v", err)
+	}
+
+	cleanRes, err := AnalyzeTrack(cleanFile)
+	if err != nil {
+		t.Fatalf("unexpected error analyzing clean audio: %v", err)
+	}
+	if cleanRes.Score < 45 || cleanRes.Score > 50 {
+		t.Errorf("expected clean audio score between 45 and 50, got %v", cleanRes.Score)
+	}
+
+	// Clipped audio
+	clippedFile := filepath.Join(tmpDir, "clipped.wav")
+	cmdClipped := exec.Command("sox", "-n", "-r", "44100", "-c", "2", clippedFile, "synth", "0.2", "sine", "1000", "vol", "10.0")
+	if err := cmdClipped.Run(); err != nil {
+		t.Fatalf("failed to create clipped audio file: %v", err)
+	}
+
+	clippedRes, err := AnalyzeTrack(clippedFile)
+	if err != nil {
+		t.Fatalf("unexpected error analyzing clipped audio: %v", err)
+	}
+	if clippedRes.Score >= cleanRes.Score {
+		t.Errorf("expected clipped audio score (%v) < clean audio score (%v)", clippedRes.Score, cleanRes.Score)
+	}
+
+	// Non-existent file
+	missingRes, err := AnalyzeTrack(filepath.Join(tmpDir, "missing.flac"))
+	if err != nil {
+		t.Fatalf("unexpected error analyzing missing file: %v", err)
+	}
+	if missingRes.Score != 0 {
+		t.Errorf("expected score 0 for missing file, got %v", missingRes.Score)
 	}
 }
