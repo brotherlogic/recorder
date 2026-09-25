@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -32,6 +33,7 @@ var (
 	procDir     = flag.String("processing_dir", "/home/simon/processing/", "Directory to processing recordings")
 	saveDir     = flag.String("save_dir", "/home/simon/music/flacs/", "Directory to save recordings")
 	processOnly = flag.Bool("process_only", false, "Only process files, do not record")
+	qualityPort = flag.Int("quality_port", 8087, "Port to serve QualityService from")
 )
 
 type Recorder struct {
@@ -630,6 +632,25 @@ func (s *Server) NewRecord(ctx context.Context, _ *pb.NewRecordRequest) (*pb.New
 	return &pb.NewRecordResponse{}, nil
 }
 
+func startQualityService(port int, sDir string, rcClient pbrc.RecordCollectionServiceClient) (*grpc.Server, net.Listener, error) {
+	log.Printf("Starting QualityService on port :%d", port)
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		log.Printf("Error listening on quality port %d: %v", port, err)
+		return nil, nil, fmt.Errorf("failed to listen on quality port %d: %w", port, err)
+	}
+	grpcServer := grpc.NewServer()
+	qualityServer := NewQualityServer(sDir, rcClient)
+	pb.RegisterQualityServiceServer(grpcServer, qualityServer)
+	log.Printf("QualityService listening on :%d", port)
+	go func() {
+		if err := grpcServer.Serve(lis); err != nil && err != grpc.ErrServerStopped && !errors.Is(err, net.ErrClosed) {
+			log.Printf("QualityService error serving: %v", err)
+		}
+	}()
+	return grpcServer, lis, nil
+}
+
 func main() {
 	flag.Parse()
 	r := &Recorder{}
@@ -651,6 +672,14 @@ func main() {
 			}
 		}
 	}()
+
+	qServer, qLis, err := startQualityService(*qualityPort, *saveDir, nil)
+	if err != nil {
+		log.Printf("Error starting QualityService listener: %v", err)
+	} else {
+		defer qServer.GracefulStop()
+		defer qLis.Close()
+	}
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {
