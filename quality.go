@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"os/exec"
@@ -320,6 +321,85 @@ func RunSoxStats(filePath string) (string, error) {
 	return string(out), err
 }
 
+// GetTrackDuration returns the duration of an audio file in seconds using soxi or sox --info.
+func GetTrackDuration(filePath string) (float64, error) {
+	cmd := exec.Command("soxi", "-D", filePath)
+	out, err := cmd.Output()
+	if err != nil {
+		cmd = exec.Command("sox", "--i", "-D", filePath)
+		out, err = cmd.Output()
+		if err != nil {
+			return 0, err
+		}
+	}
+	return strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+}
+
+// DetectLongSilence detects whether an audio track contains continuous silence > 5.0 seconds below -50 dB.
+func DetectLongSilence(filePath string) (bool, error) {
+	// 1. Check track duration: if total duration is < 5.0 seconds, return false, nil.
+	totalDuration, err := GetTrackDuration(filePath)
+	if err != nil {
+		log.Printf("Warning: failed to get track duration for %s: %v", filePath, err)
+		return false, nil
+	}
+	if totalDuration < 5.0 {
+		return false, nil
+	}
+
+	// 2. Check pure silence: if stats.PeakDb <= -100 or -inf, return true, nil.
+	out, err := RunSoxStats(filePath)
+	if err != nil {
+		log.Printf("Warning: RunSoxStats failed in DetectLongSilence for %s: %v", filePath, err)
+		return false, nil
+	}
+	stats, err := ParseSoxStats(out)
+	if err != nil {
+		log.Printf("Warning: ParseSoxStats failed in DetectLongSilence for %s: %v", filePath, err)
+		return false, nil
+	}
+	if stats.PeakDb <= -100.0 || math.IsInf(stats.PeakDb, -1) {
+		return true, nil
+	}
+
+	// 3. Run SoX silence trimming command in an isolated temporary directory:
+	// sox <filePath> <outPattern> silence 1 5.0 -50d 1 5.0 -50d : newfile : restart
+	tmpDir, err := os.MkdirTemp("", "silence_detect_*")
+	if err != nil {
+		return false, fmt.Errorf("failed to create temp dir for silence detection: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	outPattern := filepath.Join(tmpDir, "segment.wav")
+	cmd := exec.Command("sox", filePath, outPattern, "silence", "1", "0.1", "-50d", "1", "5.0", "-50d", ":", "newfile", ":", "restart")
+	if soxOut, err := cmd.CombinedOutput(); err != nil {
+		log.Printf("Warning: SoX silence command failed for %s: %v (output: %s)", filePath, err, string(soxOut))
+		return false, nil
+	}
+
+	// Detect if continuous silence periods > 5.0s exist below -50 dB
+	// (e.g., from generated segment counts or trimmed duration).
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		log.Printf("Warning: failed to read temp dir %s: %v", tmpDir, err)
+		return false, nil
+	}
+
+	if len(entries) > 1 {
+		return true, nil
+	}
+
+	if len(entries) == 1 {
+		segPath := filepath.Join(tmpDir, entries[0].Name())
+		segDuration, err := GetTrackDuration(segPath)
+		if err == nil && (totalDuration-segDuration) >= 5.0 {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
 // AnalyzeTrack inspects an audio file and calculates its cleanliness quality score.
 func AnalyzeTrack(filePath string) (*TrackQuality, error) {
 	info, err := os.Stat(filePath)
@@ -359,16 +439,31 @@ func AnalyzeTrack(filePath string) (*TrackQuality, error) {
 		}, nil
 	}
 
-	score := CalculateTrackCleanliness(stats, false)
+	hasLongSilence, err := DetectLongSilence(filePath)
+	if err != nil {
+		log.Printf("Warning: DetectLongSilence failed for %s: %v", filePath, err)
+		hasLongSilence = false
+	}
+
+	var dynamicRange float64
+	if stats.PeakDb <= -100.0 || math.IsInf(stats.PeakDb, -1) {
+		dynamicRange = 0.0
+	} else {
+		dynamicRange = stats.PeakDb - stats.RmsDb
+	}
+
+	score := CalculateTrackCleanliness(stats, hasLongSilence)
 
 	return &TrackQuality{
-		Filename:     filePath,
-		SizeBytes:    info.Size(),
-		ModTime:      info.ModTime(),
-		PeakDb:       stats.PeakDb,
-		RmsDb:        stats.RmsDb,
-		ClippedCount: stats.ClippedCount,
-		Score:        score,
+		Filename:       filePath,
+		SizeBytes:      info.Size(),
+		ModTime:        info.ModTime(),
+		PeakDb:         stats.PeakDb,
+		RmsDb:          stats.RmsDb,
+		ClippedCount:   stats.ClippedCount,
+		DynamicRange:   dynamicRange,
+		HasLongSilence: hasLongSilence,
+		Score:          score,
 	}, nil
 }
 
