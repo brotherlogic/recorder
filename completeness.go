@@ -102,15 +102,22 @@ func CalculateCompletenessScore(found, expected int) (int32, error) {
 	if expected <= 0 {
 		return 0, status.Errorf(codes.NotFound, "invalid expected tracks count: %d", expected)
 	}
-	if found == expected {
+	missing := expected - found
+	switch {
+	case missing == 0:
 		return 50, nil
-	}
-	if found < expected {
-		score := int32(50.0 * float64(found) / float64(expected))
+	case missing == 1:
+		return 25, nil
+	case missing == 2:
+		return 10, nil
+	case missing == 3:
+		return 5, nil
+	case missing >= 4:
+		return 0, nil
+	default:
+		score := int32(math.Max(0, 50-10*float64(found-expected)))
 		return score, nil
 	}
-	score := int32(math.Max(0, 50.0-float64(found-expected)*10))
-	return score, nil
 }
 
 // EvaluateCompleteness queries recordcollection, scans directory, and computes completeness score.
