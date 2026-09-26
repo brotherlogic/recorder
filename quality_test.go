@@ -272,18 +272,18 @@ func TestCacheVersionInvalidation(t *testing.T) {
 	tempDir, releaseID, summary := setupTestReleaseFiles(t)
 	defer os.RemoveAll(tempDir)
 
-	// Verify versions 0, 1, and 2 are invalidated when CurrentScoringVersion is 3
-	for _, v := range []int{0, 1, 2} {
+	// Verify versions 0, 1, 2, and 3 are invalidated when CurrentScoringVersion is 4
+	for _, v := range []int{0, 1, 2, 3} {
 		summary.Version = v
 		if IsCacheValid(tempDir, releaseID, summary) {
 			t.Errorf("expected IsCacheValid to return false for legacy version %d, got true", v)
 		}
 	}
 
-	// Verify version 3 returns true when file stats match
-	summary.Version = 3
+	// Verify version 4 returns true when file stats match
+	summary.Version = 4
 	if !IsCacheValid(tempDir, releaseID, summary) {
-		t.Errorf("expected IsCacheValid to return true for version 3 when file stats match, got false")
+		t.Errorf("expected IsCacheValid to return true for version 4 when file stats match, got false")
 	}
 }
 

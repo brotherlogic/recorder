@@ -25,7 +25,7 @@ import (
 )
 
 // CurrentScoringVersion defines the current scoring algorithm version.
-const CurrentScoringVersion = 3
+const CurrentScoringVersion = 4
 
 // DiskQualitySummary represents the quality score and best rip date for an individual disk.
 type DiskQualitySummary struct {
