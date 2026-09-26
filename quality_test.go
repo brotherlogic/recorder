@@ -1352,4 +1352,120 @@ func TestAnalyzeTrack(t *testing.T) {
 	}
 }
 
+func TestRunAwareDiskScoring(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create clean tracks for Run 2
+	cleanTrack1 := filepath.Join(tmpDir, "123_1-2026-02-01_clean_track_1.flac")
+	if err := exec.Command("sox", "-n", "-r", "44100", "-c", "2", cleanTrack1, "synth", "0.1", "sine", "1000", "pad", "0", "1.5", "repeat", "5", "vol", "-3dB").Run(); err != nil {
+		t.Fatalf("failed to create clean audio 1: %v", err)
+	}
+	cleanTrack2 := filepath.Join(tmpDir, "123_1-2026-02-01_clean_track_2.flac")
+	if err := exec.Command("sox", "-n", "-r", "44100", "-c", "2", cleanTrack2, "synth", "0.1", "sine", "1000", "pad", "0", "1.5", "repeat", "5", "vol", "-3dB").Run(); err != nil {
+		t.Fatalf("failed to create clean audio 2: %v", err)
+	}
+
+	// Create corrupt track for Run 1
+	corruptTrack := filepath.Join(tmpDir, "123_1-2026-01-01_bad_track_1.flac")
+	if err := os.WriteFile(corruptTrack, []byte("NOT_A_VALID_FLAC"), 0644); err != nil {
+		t.Fatalf("failed to create corrupt track: %v", err)
+	}
+
+	// Run 1: 1 corrupt track out of 2 expected tracks (completeness: 25, cleanliness: 0 -> total: 25)
+	// Run 2: 2 clean tracks out of 2 expected tracks (completeness: 50, cleanliness: ~45-50 -> total: ~95-100)
+	diskRuns := map[string][]string{
+		"2026-01-01": {corruptTrack},
+		"2026-02-01": {cleanTrack1, cleanTrack2},
+	}
+
+	summary, trackMap, err := EvaluateDiskRuns(1, diskRuns, 2)
+	if err != nil {
+		t.Fatalf("unexpected error evaluating disk runs: %v", err)
+	}
+
+	if summary == nil {
+		t.Fatalf("expected non-nil summary")
+	}
+	if summary.Disk != 1 {
+		t.Errorf("expected disk 1, got %d", summary.Disk)
+	}
+	if summary.BestRipDate != "2026-02-01" {
+		t.Errorf("expected BestRipDate 2026-02-01, got %s", summary.BestRipDate)
+	}
+	if summary.Score < 90 {
+		t.Errorf("expected winning score >= 90, got %d", summary.Score)
+	}
+	if len(trackMap) != 2 {
+		t.Errorf("expected 2 tracks in winning trackMap, got %d", len(trackMap))
+	}
+}
+
+func TestRunTieBreaking(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	track1 := filepath.Join(tmpDir, "123_1-2026-01-01_track_1.flac")
+	if err := exec.Command("sox", "-n", "-r", "44100", "-c", "2", track1, "synth", "0.1", "sine", "1000", "pad", "0", "1.5", "repeat", "5", "vol", "-3dB").Run(); err != nil {
+		t.Fatalf("failed to create audio: %v", err)
+	}
+
+	track2 := filepath.Join(tmpDir, "123_1-2026-02-01_track_1.flac")
+	data, err := os.ReadFile(track1)
+	if err != nil {
+		t.Fatalf("failed to read track1: %v", err)
+	}
+	if err := os.WriteFile(track2, data, 0644); err != nil {
+		t.Fatalf("failed to write track2: %v", err)
+	}
+
+	// Given Run 1 (2026-01-01, equal score) and Run 2 (2026-02-01, equal score)
+	diskRuns := map[string][]string{
+		"2026-01-01": {track1},
+		"2026-02-01": {track2},
+	}
+
+	summary, trackMap, err := EvaluateDiskRuns(1, diskRuns, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if summary.BestRipDate != "2026-02-01" {
+		t.Errorf("expected winning run 2026-02-01 (most recent date), got %s", summary.BestRipDate)
+	}
+	if len(trackMap) != 1 {
+		t.Errorf("expected 1 track in winning trackMap, got %d", len(trackMap))
+	}
+}
+
+func TestEvaluateDiskRunsEmpty(t *testing.T) {
+	summary, trackMap, err := EvaluateDiskRuns(2, map[string][]string{}, 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if summary.Disk != 2 {
+		t.Errorf("expected disk 2, got %d", summary.Disk)
+	}
+	if summary.BestRipDate != "" {
+		t.Errorf("expected empty BestRipDate, got %s", summary.BestRipDate)
+	}
+	if summary.Score != 0 {
+		t.Errorf("expected score 0, got %d", summary.Score)
+	}
+	if len(trackMap) != 0 {
+		t.Errorf("expected empty trackMap, got %v", trackMap)
+	}
+}
+
+func TestEvaluateRunCompletenessAndCleanliness(t *testing.T) {
+	// Test error when expectedTracks <= 0
+	_, _, _, _, err := EvaluateRunCompletenessAndCleanliness([]string{"dummy.flac"}, 0)
+	if err == nil {
+		t.Errorf("expected error for expectedTracks <= 0, got nil")
+	}
+
+	// Test empty tracks returns error from CalculateCompletenessScore
+	_, _, _, _, err = EvaluateRunCompletenessAndCleanliness([]string{}, 2)
+	if err == nil {
+		t.Errorf("expected error for empty tracks, got nil")
+	}
+}
+
 

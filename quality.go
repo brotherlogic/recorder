@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -513,6 +514,110 @@ func CalculateAggregateCleanlinessFromMap(tracks map[string]TrackQuality) int32 
 		avg = 50
 	}
 	return avg
+}
+
+// EvaluateRunCompletenessAndCleanliness evaluates the completeness and cleanliness scores for a specific run.
+func EvaluateRunCompletenessAndCleanliness(tracks []string, expectedTracks int) (completenessScore int32, cleanlinessScore int32, totalScore int32, trackMap map[string]TrackQuality, err error) {
+	completenessScore, err = CalculateCompletenessScore(len(tracks), expectedTracks)
+	if err != nil {
+		return 0, 0, 0, nil, err
+	}
+
+	trackMap = make(map[string]TrackQuality, len(tracks))
+	for _, trackPath := range tracks {
+		tq, err := AnalyzeTrack(trackPath)
+		if err != nil {
+			return 0, 0, 0, nil, err
+		}
+		trackMap[trackPath] = *tq
+	}
+
+	cleanlinessScore = CalculateAggregateCleanlinessFromMap(trackMap)
+	totalScore = completenessScore + cleanlinessScore
+	if totalScore < 0 {
+		totalScore = 0
+	} else if totalScore > 100 {
+		totalScore = 100
+	}
+
+	return completenessScore, cleanlinessScore, totalScore, trackMap, nil
+}
+
+// isLaterDate returns true if date1 is more recent than date2.
+func isLaterDate(date1, date2 string) bool {
+	layouts := []string{"2006-01-02-02", "2006-01-02", time.RFC3339}
+	var t1, t2 time.Time
+	for _, layout := range layouts {
+		if t1.IsZero() {
+			if parsed, err := time.Parse(layout, date1); err == nil {
+				t1 = parsed
+			}
+		}
+		if t2.IsZero() {
+			if parsed, err := time.Parse(layout, date2); err == nil {
+				t2 = parsed
+			}
+		}
+	}
+	if !t1.IsZero() && !t2.IsZero() && !t1.Equal(t2) {
+		return t1.After(t2)
+	}
+	return date1 > date2
+}
+
+// EvaluateDiskRuns evaluates all runs for a single disk and returns the winning DiskQualitySummary and associated tracks.
+func EvaluateDiskRuns(disk int32, diskRuns map[string][]string, expectedTracks int) (*DiskQualitySummary, map[string]TrackQuality, error) {
+	if len(diskRuns) == 0 {
+		return &DiskQualitySummary{
+			Disk:        disk,
+			BestRipDate: "",
+			Score:       0,
+		}, make(map[string]TrackQuality), nil
+	}
+
+	runDates := make([]string, 0, len(diskRuns))
+	for date := range diskRuns {
+		runDates = append(runDates, date)
+	}
+	sort.Strings(runDates)
+
+	var (
+		hasWinner     bool
+		winningDate   string
+		winningScore  int32
+		winningTracks map[string]TrackQuality
+	)
+
+	for _, date := range runDates {
+		trackFiles := diskRuns[date]
+		_, _, totalScore, trackMap, err := EvaluateRunCompletenessAndCleanliness(trackFiles, expectedTracks)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		if !hasWinner {
+			hasWinner = true
+			winningDate = date
+			winningScore = totalScore
+			winningTracks = trackMap
+		} else if totalScore > winningScore {
+			winningDate = date
+			winningScore = totalScore
+			winningTracks = trackMap
+		} else if totalScore == winningScore {
+			if isLaterDate(date, winningDate) {
+				winningDate = date
+				winningScore = totalScore
+				winningTracks = trackMap
+			}
+		}
+	}
+
+	return &DiskQualitySummary{
+		Disk:        disk,
+		BestRipDate: winningDate,
+		Score:       winningScore,
+	}, winningTracks, nil
 }
 
 // KeyedMutex provides thread-safe per-release concurrency locking.
