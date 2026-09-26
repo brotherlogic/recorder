@@ -119,7 +119,7 @@ func CalculateCompletenessScore(found, expected int) (int32, error) {
 	case missing == 0:
 		return 50, nil
 	case missing == 1:
-		return 25, nil
+		return 30, nil
 	case missing == 2:
 		return 10, nil
 	case missing == 3:
@@ -127,7 +127,7 @@ func CalculateCompletenessScore(found, expected int) (int32, error) {
 	case missing >= 4:
 		return 0, nil
 	default:
-		score := int32(math.Max(0, 50-10*float64(found-expected)))
+		score := int32(math.Max(0, 50-20*float64(found-expected)))
 		return score, nil
 	}
 }

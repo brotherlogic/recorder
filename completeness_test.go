@@ -37,12 +37,33 @@ func TestCalculateCompletenessScore(t *testing.T) {
 			expectedScore: 0,
 			expectErrCode: codePtr(codes.NotFound),
 		},
-		// Single track edge case
+		// Single track edge cases
 		{
 			name:          "Single track match",
 			found:         1,
 			expected:      1,
 			expectedScore: 50,
+			expectErrCode: nil,
+		},
+		{
+			name:          "Single track with 1 extra track",
+			found:         2,
+			expected:      1,
+			expectedScore: 30,
+			expectErrCode: nil,
+		},
+		{
+			name:          "Single track with 2 extra tracks",
+			found:         3,
+			expected:      1,
+			expectedScore: 10,
+			expectErrCode: nil,
+		},
+		{
+			name:          "Single track with 3 extra tracks",
+			found:         4,
+			expected:      1,
+			expectedScore: 0,
 			expectErrCode: nil,
 		},
 		// Discrete step curve cases (missing tracks)
@@ -57,7 +78,7 @@ func TestCalculateCompletenessScore(t *testing.T) {
 			name:          "1 missing track",
 			found:         9,
 			expected:      10,
-			expectedScore: 25,
+			expectedScore: 30,
 			expectErrCode: nil,
 		},
 		{
@@ -93,14 +114,21 @@ func TestCalculateCompletenessScore(t *testing.T) {
 			name:          "1 extra track",
 			found:         11,
 			expected:      10,
-			expectedScore: 40,
+			expectedScore: 30,
 			expectErrCode: nil,
 		},
 		{
 			name:          "2 extra tracks",
 			found:         12,
 			expected:      10,
-			expectedScore: 30,
+			expectedScore: 10,
+			expectErrCode: nil,
+		},
+		{
+			name:          "3 extra tracks",
+			found:         13,
+			expected:      10,
+			expectedScore: 0,
 			expectErrCode: nil,
 		},
 		{
