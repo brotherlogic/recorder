@@ -45,6 +45,28 @@ type TrackQuality struct {
 	DynamicRange   float64   `json:"dynamic_range"`
 	HasLongSilence bool      `json:"has_long_silence"`
 	Score          int32     `json:"score"` // 0 - 50
+	Duration       string    `json:"duration"`
+}
+
+// FormatTrackDuration formats a duration in seconds into mm:ss or hh:mm:ss.
+// If seconds is negative, NaN, or Inf, it returns "ERROR".
+func FormatTrackDuration(seconds float64) string {
+	if math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds < 0 {
+		return "ERROR"
+	}
+
+	rounded := int64(math.Round(seconds))
+	if rounded < 3600 {
+		minutes := rounded / 60
+		secs := rounded % 60
+		return fmt.Sprintf("%02d:%02d", minutes, secs)
+	}
+
+	hours := rounded / 3600
+	rem := rounded % 3600
+	minutes := rem / 60
+	secs := rem % 60
+	return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, secs)
 }
 
 // QualitySummary represents the composite evaluation and per-track breakdown for a release.
