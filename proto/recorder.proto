@@ -17,8 +17,15 @@ message GetQualityRequest {
   int64 release_id = 1;
 }
 
+message DiskQuality {
+  int32 disk = 1;
+  string best_rip_date = 2;
+  int32 score = 3;
+}
+
 message GetQualityResponse {
   int32 score = 1;
+  repeated DiskQuality disk_qualities = 2;
 }
 
 service QualityService {

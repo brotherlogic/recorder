@@ -137,16 +137,77 @@ func (x *GetQualityRequest) GetReleaseId() int64 {
 	return 0
 }
 
+type DiskQuality struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Disk          int32                  `protobuf:"varint,1,opt,name=disk,proto3" json:"disk,omitempty"`
+	BestRipDate   string                 `protobuf:"bytes,2,opt,name=best_rip_date,json=bestRipDate,proto3" json:"best_rip_date,omitempty"`
+	Score         int32                  `protobuf:"varint,3,opt,name=score,proto3" json:"score,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DiskQuality) Reset() {
+	*x = DiskQuality{}
+	mi := &file_recorder_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DiskQuality) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DiskQuality) ProtoMessage() {}
+
+func (x *DiskQuality) ProtoReflect() protoreflect.Message {
+	mi := &file_recorder_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DiskQuality.ProtoReflect.Descriptor instead.
+func (*DiskQuality) Descriptor() ([]byte, []int) {
+	return file_recorder_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *DiskQuality) GetDisk() int32 {
+	if x != nil {
+		return x.Disk
+	}
+	return 0
+}
+
+func (x *DiskQuality) GetBestRipDate() string {
+	if x != nil {
+		return x.BestRipDate
+	}
+	return ""
+}
+
+func (x *DiskQuality) GetScore() int32 {
+	if x != nil {
+		return x.Score
+	}
+	return 0
+}
+
 type GetQualityResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Score         int32                  `protobuf:"varint,1,opt,name=score,proto3" json:"score,omitempty"`
+	DiskQualities []*DiskQuality         `protobuf:"bytes,2,rep,name=disk_qualities,json=diskQualities,proto3" json:"disk_qualities,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GetQualityResponse) Reset() {
 	*x = GetQualityResponse{}
-	mi := &file_recorder_proto_msgTypes[3]
+	mi := &file_recorder_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -158,7 +219,7 @@ func (x *GetQualityResponse) String() string {
 func (*GetQualityResponse) ProtoMessage() {}
 
 func (x *GetQualityResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_recorder_proto_msgTypes[3]
+	mi := &file_recorder_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -171,7 +232,7 @@ func (x *GetQualityResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetQualityResponse.ProtoReflect.Descriptor instead.
 func (*GetQualityResponse) Descriptor() ([]byte, []int) {
-	return file_recorder_proto_rawDescGZIP(), []int{3}
+	return file_recorder_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *GetQualityResponse) GetScore() int32 {
@@ -179,6 +240,13 @@ func (x *GetQualityResponse) GetScore() int32 {
 		return x.Score
 	}
 	return 0
+}
+
+func (x *GetQualityResponse) GetDiskQualities() []*DiskQuality {
+	if x != nil {
+		return x.DiskQualities
+	}
+	return nil
 }
 
 var File_recorder_proto protoreflect.FileDescriptor
@@ -190,9 +258,14 @@ const file_recorder_proto_rawDesc = "" +
 	"\x11NewRecordResponse\"2\n" +
 	"\x11GetQualityRequest\x12\x1d\n" +
 	"\n" +
-	"release_id\x18\x01 \x01(\x03R\treleaseId\"*\n" +
+	"release_id\x18\x01 \x01(\x03R\treleaseId\"[\n" +
+	"\vDiskQuality\x12\x12\n" +
+	"\x04disk\x18\x01 \x01(\x05R\x04disk\x12\"\n" +
+	"\rbest_rip_date\x18\x02 \x01(\tR\vbestRipDate\x12\x14\n" +
+	"\x05score\x18\x03 \x01(\x05R\x05score\"h\n" +
 	"\x12GetQualityResponse\x12\x14\n" +
-	"\x05score\x18\x01 \x01(\x05R\x05score2T\n" +
+	"\x05score\x18\x01 \x01(\x05R\x05score\x12<\n" +
+	"\x0edisk_qualities\x18\x02 \x03(\v2\x15.recorder.DiskQualityR\rdiskQualities2T\n" +
 	"\fRecordGetter\x12D\n" +
 	"\tNewRecord\x12\x1a.recorder.NewRecordRequest\x1a\x1b.recorder.NewRecordResponse2Y\n" +
 	"\x0eQualityService\x12G\n" +
@@ -211,23 +284,25 @@ func file_recorder_proto_rawDescGZIP() []byte {
 	return file_recorder_proto_rawDescData
 }
 
-var file_recorder_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_recorder_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_recorder_proto_goTypes = []any{
 	(*NewRecordRequest)(nil),   // 0: recorder.NewRecordRequest
 	(*NewRecordResponse)(nil),  // 1: recorder.NewRecordResponse
 	(*GetQualityRequest)(nil),  // 2: recorder.GetQualityRequest
-	(*GetQualityResponse)(nil), // 3: recorder.GetQualityResponse
+	(*DiskQuality)(nil),        // 3: recorder.DiskQuality
+	(*GetQualityResponse)(nil), // 4: recorder.GetQualityResponse
 }
 var file_recorder_proto_depIdxs = []int32{
-	0, // 0: recorder.RecordGetter.NewRecord:input_type -> recorder.NewRecordRequest
-	2, // 1: recorder.QualityService.GetQuality:input_type -> recorder.GetQualityRequest
-	1, // 2: recorder.RecordGetter.NewRecord:output_type -> recorder.NewRecordResponse
-	3, // 3: recorder.QualityService.GetQuality:output_type -> recorder.GetQualityResponse
-	2, // [2:4] is the sub-list for method output_type
-	0, // [0:2] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	3, // 0: recorder.GetQualityResponse.disk_qualities:type_name -> recorder.DiskQuality
+	0, // 1: recorder.RecordGetter.NewRecord:input_type -> recorder.NewRecordRequest
+	2, // 2: recorder.QualityService.GetQuality:input_type -> recorder.GetQualityRequest
+	1, // 3: recorder.RecordGetter.NewRecord:output_type -> recorder.NewRecordResponse
+	4, // 4: recorder.QualityService.GetQuality:output_type -> recorder.GetQualityResponse
+	3, // [3:5] is the sub-list for method output_type
+	1, // [1:3] is the sub-list for method input_type
+	1, // [1:1] is the sub-list for extension type_name
+	1, // [1:1] is the sub-list for extension extendee
+	0, // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_recorder_proto_init() }
@@ -241,7 +316,7 @@ func file_recorder_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_recorder_proto_rawDesc), len(file_recorder_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   2,
 		},
