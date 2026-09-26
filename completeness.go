@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 
@@ -147,3 +149,85 @@ func EvaluateCompleteness(ctx context.Context, client pbrc.RecordCollectionServi
 		Files:          files,
 	}, nil
 }
+
+// TrackFileInfo contains parsed details from a track audio filename.
+type TrackFileInfo struct {
+	Path      string
+	Filename  string
+	ReleaseID int64
+	Disk      int32
+	Date      string
+	TrackNum  int
+}
+
+var trackFilenameRegex = regexp.MustCompile(`^(?P<release>\d+)(?:_(?P<disk>\d+))?-(?P<date>\d{4}-\d{2}-\d{2}(?:-\d+)?).*_track_(?P<track>\d+)\.flac$`)
+
+// ParseTrackFilename parses a track filename and extracts release, disk, date, and track number.
+func ParseTrackFilename(filename string, releaseID int64) (*TrackFileInfo, error) {
+	base := filepath.Base(filename)
+	matches := trackFilenameRegex.FindStringSubmatch(base)
+	if matches == nil {
+		return nil, fmt.Errorf("filename %q does not match expected pattern", base)
+	}
+
+	relIdx := trackFilenameRegex.SubexpIndex("release")
+	diskIdx := trackFilenameRegex.SubexpIndex("disk")
+	dateIdx := trackFilenameRegex.SubexpIndex("date")
+	trackIdx := trackFilenameRegex.SubexpIndex("track")
+
+	parsedRelease, err := strconv.ParseInt(matches[relIdx], 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse release ID: %w", err)
+	}
+	if releaseID > 0 && parsedRelease != releaseID {
+		return nil, fmt.Errorf("release ID mismatch: expected %d, got %d", releaseID, parsedRelease)
+	}
+
+	var disk int32 = 1
+	if matches[diskIdx] != "" {
+		d, err := strconv.ParseInt(matches[diskIdx], 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse disk number: %w", err)
+		}
+		if d > 0 {
+			disk = int32(d)
+		}
+	}
+
+	trackNum, err := strconv.Atoi(matches[trackIdx])
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse track number: %w", err)
+	}
+
+	return &TrackFileInfo{
+		Path:      filename,
+		Filename:  base,
+		ReleaseID: parsedRelease,
+		Disk:      disk,
+		Date:      matches[dateIdx],
+		TrackNum:  trackNum,
+	}, nil
+}
+
+// GroupTracksByDiskAndRun groups audio file paths by disk and recording run identifier.
+func GroupTracksByDiskAndRun(files []string, releaseID int64) (map[int32]map[string][]string, error) {
+	result := make(map[int32]map[string][]string)
+	for _, file := range files {
+		info, err := ParseTrackFilename(file, releaseID)
+		if err != nil {
+			// Non-matching or malformed filenames are skipped gracefully
+			continue
+		}
+		if _, ok := result[info.Disk]; !ok {
+			result[info.Disk] = make(map[string][]string)
+		}
+		result[info.Disk][info.Date] = append(result[info.Disk][info.Date], file)
+	}
+	for _, runs := range result {
+		for run := range runs {
+			sort.Strings(runs[run])
+		}
+	}
+	return result, nil
+}
+
