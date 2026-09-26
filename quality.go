@@ -565,14 +565,13 @@ func isLaterDate(date1, date2 string) bool {
 	return date1 > date2
 }
 
-// EvaluateDiskRuns evaluates all runs for a single disk and returns the winning DiskQualitySummary and associated tracks.
-func EvaluateDiskRuns(disk int32, diskRuns map[string][]string, expectedTracks int) (*DiskQualitySummary, map[string]TrackQuality, error) {
+func EvaluateDiskRuns(disk int32, diskRuns map[string][]string, expectedTracks int) (*DiskQualitySummary, map[string]TrackQuality, map[string]TrackQuality, error) {
 	if len(diskRuns) == 0 {
 		return &DiskQualitySummary{
 			Disk:        disk,
 			BestRipDate: "",
 			Score:       0,
-		}, make(map[string]TrackQuality), nil
+		}, make(map[string]TrackQuality), make(map[string]TrackQuality), nil
 	}
 
 	runDates := make([]string, 0, len(diskRuns))
@@ -587,12 +586,16 @@ func EvaluateDiskRuns(disk int32, diskRuns map[string][]string, expectedTracks i
 		winningScore  int32
 		winningTracks map[string]TrackQuality
 	)
+	allTracks := make(map[string]TrackQuality)
 
 	for _, date := range runDates {
 		trackFiles := diskRuns[date]
 		_, _, totalScore, trackMap, err := EvaluateRunCompletenessAndCleanliness(trackFiles, expectedTracks)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
+		}
+		for k, v := range trackMap {
+			allTracks[k] = v
 		}
 
 		if !hasWinner {
@@ -617,7 +620,7 @@ func EvaluateDiskRuns(disk int32, diskRuns map[string][]string, expectedTracks i
 		Disk:        disk,
 		BestRipDate: winningDate,
 		Score:       winningScore,
-	}, winningTracks, nil
+	}, winningTracks, allTracks, nil
 }
 
 // KeyedMutex provides thread-safe per-release concurrency locking.
@@ -731,7 +734,7 @@ func (s *QualityServer) GetQuality(ctx context.Context, req *pb.GetQualityReques
 		expectedTracks := getExpectedTracks(rel, d)
 		runs, hasRuns := diskRuns[d]
 		if hasRuns && len(runs) > 0 {
-			dSummary, trackMap, err := EvaluateDiskRuns(d, runs, expectedTracks)
+			dSummary, _, allTracksMap, err := EvaluateDiskRuns(d, runs, expectedTracks)
 			if err != nil {
 				return nil, err
 			}
@@ -741,7 +744,7 @@ func (s *QualityServer) GetQuality(ctx context.Context, req *pb.GetQualityReques
 				BestRipDate: dSummary.BestRipDate,
 				Score:       dSummary.Score,
 			})
-			for k, v := range trackMap {
+			for k, v := range allTracksMap {
 				base := filepath.Base(k)
 				v.Filename = base
 				combinedTracks[base] = v

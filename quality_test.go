@@ -1378,7 +1378,7 @@ func TestRunAwareDiskScoring(t *testing.T) {
 		"2026-02-01": {cleanTrack1, cleanTrack2},
 	}
 
-	summary, trackMap, err := EvaluateDiskRuns(1, diskRuns, 2)
+	summary, trackMap, _, err := EvaluateDiskRuns(1, diskRuns, 2)
 	if err != nil {
 		t.Fatalf("unexpected error evaluating disk runs: %v", err)
 	}
@@ -1423,7 +1423,7 @@ func TestRunTieBreaking(t *testing.T) {
 		"2026-02-01": {track2},
 	}
 
-	summary, trackMap, err := EvaluateDiskRuns(1, diskRuns, 1)
+	summary, trackMap, _, err := EvaluateDiskRuns(1, diskRuns, 1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1436,7 +1436,7 @@ func TestRunTieBreaking(t *testing.T) {
 }
 
 func TestEvaluateDiskRunsEmpty(t *testing.T) {
-	summary, trackMap, err := EvaluateDiskRuns(2, map[string][]string{}, 5)
+	summary, trackMap, _, err := EvaluateDiskRuns(2, map[string][]string{}, 5)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
