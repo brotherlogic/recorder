@@ -1858,3 +1858,57 @@ func TestQualitySummarySerializationWithDuration(t *testing.T) {
 		t.Errorf("expected empty Duration for legacy track, got %q", legacyTrack.Duration)
 	}
 }
+
+func TestAnalyzeTrack_Duration(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Missing / nonexistent file
+	missingFile := filepath.Join(tmpDir, "nonexistent.flac")
+	resMissing, err := AnalyzeTrack(missingFile)
+	if err != nil {
+		t.Fatalf("unexpected error on missing file: %v", err)
+	}
+	if resMissing.Duration != "ERROR" {
+		t.Errorf("expected Duration 'ERROR' for missing file, got %q", resMissing.Duration)
+	}
+
+	// 2. 0-byte file
+	emptyFile := filepath.Join(tmpDir, "empty.flac")
+	if err := os.WriteFile(emptyFile, []byte{}, 0644); err != nil {
+		t.Fatalf("failed to create empty file: %v", err)
+	}
+	resEmpty, err := AnalyzeTrack(emptyFile)
+	if err != nil {
+		t.Fatalf("unexpected error on 0-byte file: %v", err)
+	}
+	if resEmpty.Duration != "ERROR" {
+		t.Errorf("expected Duration 'ERROR' for 0-byte file, got %q", resEmpty.Duration)
+	}
+
+	// 3. Corrupt / non-audio file
+	corruptFile := filepath.Join(tmpDir, "corrupt.flac")
+	if err := os.WriteFile(corruptFile, []byte("NOT_A_VALID_FLAC_FILE_HEADER"), 0644); err != nil {
+		t.Fatalf("failed to create corrupt file: %v", err)
+	}
+	resCorrupt, err := AnalyzeTrack(corruptFile)
+	if err != nil {
+		t.Fatalf("unexpected error on corrupt file: %v", err)
+	}
+	if resCorrupt.Duration != "ERROR" {
+		t.Errorf("expected Duration 'ERROR' for corrupt file, got %q", resCorrupt.Duration)
+	}
+
+	// 4. Valid audio file (5 seconds)
+	validFile := filepath.Join(tmpDir, "valid.flac")
+	cmd := exec.Command("sox", "-n", "-r", "44100", "-c", "2", validFile, "synth", "5.0", "sine", "1000", "vol", "-3dB")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to create valid audio file: %v", err)
+	}
+	resValid, err := AnalyzeTrack(validFile)
+	if err != nil {
+		t.Fatalf("unexpected error on valid file: %v", err)
+	}
+	if resValid.Duration != "00:05" {
+		t.Errorf("expected Duration '00:05' for 5-second track, got %q", resValid.Duration)
+	}
+}

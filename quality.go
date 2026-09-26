@@ -438,6 +438,7 @@ func AnalyzeTrack(filePath string) (*TrackQuality, error) {
 		return &TrackQuality{
 			Filename: filePath,
 			Score:    0,
+			Duration: "ERROR",
 		}, nil
 	}
 
@@ -447,6 +448,7 @@ func AnalyzeTrack(filePath string) (*TrackQuality, error) {
 			SizeBytes: 0,
 			ModTime:   info.ModTime(),
 			Score:     0,
+			Duration:  "ERROR",
 		}, nil
 	}
 
@@ -457,6 +459,7 @@ func AnalyzeTrack(filePath string) (*TrackQuality, error) {
 			SizeBytes: info.Size(),
 			ModTime:   info.ModTime(),
 			Score:     0,
+			Duration:  "ERROR",
 		}, nil
 	}
 
@@ -467,6 +470,7 @@ func AnalyzeTrack(filePath string) (*TrackQuality, error) {
 			SizeBytes: info.Size(),
 			ModTime:   info.ModTime(),
 			Score:     0,
+			Duration:  "ERROR",
 		}, nil
 	}
 
@@ -485,6 +489,12 @@ func AnalyzeTrack(filePath string) (*TrackQuality, error) {
 
 	score := CalculateTrackCleanliness(stats, hasLongSilence)
 
+	durationStr := "ERROR"
+	durationSecs, err := GetTrackDuration(filePath)
+	if err == nil {
+		durationStr = FormatTrackDuration(durationSecs)
+	}
+
 	return &TrackQuality{
 		Filename:       filePath,
 		SizeBytes:      info.Size(),
@@ -495,6 +505,7 @@ func AnalyzeTrack(filePath string) (*TrackQuality, error) {
 		DynamicRange:   dynamicRange,
 		HasLongSilence: hasLongSilence,
 		Score:          score,
+		Duration:       durationStr,
 	}, nil
 }
 
