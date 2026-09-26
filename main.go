@@ -565,7 +565,16 @@ func (s *Server) processFiles(dir string) error {
 		}
 
 		if rcclient != nil {
-			records, err := rcclient.QueryRecords(ctx, &pbrc.QueryRecordsRequest{
+			// Pre-warm the quality cache to avoid deadlock during UpdateRecord
+			// by evaluating quality before we lock the record in recordcollection.
+			qServer := NewQualityServer(*saveDir, rcclient)
+			_, preWarmErr := qServer.GetQuality(context.Background(), &pb.GetQualityRequest{ReleaseId: int64(id)})
+			if preWarmErr != nil {
+				log.Printf("Warning: failed to pre-warm quality cache: %v", preWarmErr)
+			}
+
+			updateCtx, updateCancel := context.WithTimeout(context.Background(), time.Minute)
+			records, err := rcclient.QueryRecords(updateCtx, &pbrc.QueryRecordsRequest{
 				Query: &pbrc.QueryRecordsRequest_ReleaseId{
 					ReleaseId: id,
 				},
@@ -573,9 +582,13 @@ func (s *Server) processFiles(dir string) error {
 			log.Printf("Query: %v -> %v", records, err)
 			if err == nil {
 				for _, record := range records.GetInstanceIds() {
-					rcclient.UpdateRecord(ctx, &pbrc.UpdateRecordRequest{Reason: "digital rip", Update: &pbrc.Record{Release: &pbgd.Release{InstanceId: record}, Metadata: &pbrc.ReleaseMetadata{LastRipDate: time.Now().Unix()}}})
+					_, updateErr := rcclient.UpdateRecord(updateCtx, &pbrc.UpdateRecordRequest{Reason: "digital rip", Update: &pbrc.Record{Release: &pbgd.Release{InstanceId: record}, Metadata: &pbrc.ReleaseMetadata{LastRipDate: time.Now().Unix()}}})
+					if updateErr != nil {
+						log.Printf("Error updating record: %v", updateErr)
+					}
 				}
 			}
+			updateCancel()
 			conn.Close()
 		}
 		cancel()
