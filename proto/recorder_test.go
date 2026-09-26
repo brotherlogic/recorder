@@ -33,3 +33,25 @@ func TestQualityProtoTypes(t *testing.T) {
 		t.Fatalf("expected score 85, got %d", resp.GetScore())
 	}
 }
+
+func TestDiskQualityProtoTypes(t *testing.T) {
+	dq := &DiskQuality{
+		Disk:        1,
+		BestRipDate: "2026-09-25",
+		Score:       85,
+	}
+	if dq.GetDisk() != 1 || dq.GetBestRipDate() != "2026-09-25" || dq.GetScore() != 85 {
+		t.Fatalf("unexpected DiskQuality values: %+v", dq)
+	}
+
+	res := &GetQualityResponse{
+		Score:         85,
+		DiskQualities: []*DiskQuality{dq},
+	}
+	if len(res.GetDiskQualities()) != 1 {
+		t.Fatalf("expected 1 disk quality, got %d", len(res.GetDiskQualities()))
+	}
+	if res.GetDiskQualities()[0].GetDisk() != 1 {
+		t.Fatalf("expected disk 1, got %d", res.GetDiskQualities()[0].GetDisk())
+	}
+}
