@@ -162,10 +162,128 @@ func TestQualitySummaryCacheVersioning(t *testing.T) {
 		t.Errorf("expected IsCacheValid to return false when summary.Version is 1, got true")
 	}
 
+	// Verify IsCacheValid returns false when summary.Version is 2
+	summary.Version = 2
+	if IsCacheValid(tempDir, releaseID, summary) {
+		t.Errorf("expected IsCacheValid to return false when summary.Version is 2, got true")
+	}
+
 	// Verify IsCacheValid returns true when summary.Version == CurrentScoringVersion and file modification times/sizes match
 	summary.Version = CurrentScoringVersion
 	if !IsCacheValid(tempDir, releaseID, summary) {
 		t.Errorf("expected IsCacheValid to return true when summary.Version is CurrentScoringVersion (%d), got false", CurrentScoringVersion)
+	}
+}
+
+func TestQualitySummaryV3Serialization(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "quality_test_v3_ser")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	releaseID := int64(12345)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	original := &QualitySummary{
+		ReleaseID:         releaseID,
+		Version:           3,
+		Score:             85,
+		CompletenessScore: 45,
+		CleanlinessScore:  40,
+		ExpectedTracks:    2,
+		FoundTracks:       2,
+		LastEvaluated:     now,
+		Disks: []DiskQualitySummary{
+			{
+				Disk:        1,
+				BestRipDate: "2026-09-25",
+				Score:       85,
+			},
+			{
+				Disk:        2,
+				BestRipDate: "2026-09-26",
+				Score:       90,
+			},
+		},
+		Tracks: map[string]TrackQuality{
+			"track1.flac": {
+				Filename:       "track1.flac",
+				SizeBytes:      1024,
+				ModTime:        now,
+				PeakDb:         -1.5,
+				RmsDb:          -14.2,
+				ClippedCount:   0,
+				DynamicRange:   12.7,
+				HasLongSilence: false,
+				Score:          40,
+			},
+			"track2.flac": {
+				Filename:       "track2.flac",
+				SizeBytes:      2048,
+				ModTime:        now,
+				PeakDb:         -2.0,
+				RmsDb:          -15.0,
+				ClippedCount:   1,
+				DynamicRange:   13.0,
+				HasLongSilence: true,
+				Score:          38,
+			},
+		},
+	}
+
+	err = WriteQualitySummary(tempDir, releaseID, original)
+	if err != nil {
+		t.Fatalf("WriteQualitySummary failed: %v", err)
+	}
+
+	loaded, err := ReadQualitySummary(tempDir, releaseID)
+	if err != nil {
+		t.Fatalf("ReadQualitySummary failed: %v", err)
+	}
+
+	if loaded == nil {
+		t.Fatalf("loaded summary is nil")
+	}
+
+	if loaded.Version != 3 {
+		t.Errorf("Version mismatch: got %v, want 3", loaded.Version)
+	}
+
+	if len(loaded.Disks) != len(original.Disks) {
+		t.Fatalf("Disks length mismatch: got %v, want %v", len(loaded.Disks), len(original.Disks))
+	}
+
+	for i, origDisk := range original.Disks {
+		loadedDisk := loaded.Disks[i]
+		if loadedDisk.Disk != origDisk.Disk {
+			t.Errorf("Disk[%d].Disk mismatch: got %v, want %v", i, loadedDisk.Disk, origDisk.Disk)
+		}
+		if loadedDisk.BestRipDate != origDisk.BestRipDate {
+			t.Errorf("Disk[%d].BestRipDate mismatch: got %v, want %v", i, loadedDisk.BestRipDate, origDisk.BestRipDate)
+		}
+		if loadedDisk.Score != origDisk.Score {
+			t.Errorf("Disk[%d].Score mismatch: got %v, want %v", i, loadedDisk.Score, origDisk.Score)
+		}
+	}
+}
+
+func TestCacheVersionInvalidation(t *testing.T) {
+	tempDir, releaseID, summary := setupTestReleaseFiles(t)
+	defer os.RemoveAll(tempDir)
+
+	// Verify versions 0, 1, and 2 are invalidated when CurrentScoringVersion is 3
+	for _, v := range []int{0, 1, 2} {
+		summary.Version = v
+		if IsCacheValid(tempDir, releaseID, summary) {
+			t.Errorf("expected IsCacheValid to return false for legacy version %d, got true", v)
+		}
+	}
+
+	// Verify version 3 returns true when file stats match
+	summary.Version = 3
+	if !IsCacheValid(tempDir, releaseID, summary) {
+		t.Errorf("expected IsCacheValid to return true for version 3 when file stats match, got false")
 	}
 }
 
