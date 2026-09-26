@@ -24,7 +24,14 @@ import (
 )
 
 // CurrentScoringVersion defines the current scoring algorithm version.
-const CurrentScoringVersion = 2
+const CurrentScoringVersion = 3
+
+// DiskQualitySummary represents the quality score and best rip date for an individual disk.
+type DiskQualitySummary struct {
+	Disk        int32  `json:"disk"`
+	BestRipDate string `json:"best_rip_date"`
+	Score       int32  `json:"score"`
+}
 
 // TrackQuality represents the audio quality analysis metrics for an individual track.
 type TrackQuality struct {
@@ -48,6 +55,7 @@ type QualitySummary struct {
 	CleanlinessScore  int32                   `json:"cleanliness_score"`  // 0 - 50
 	ExpectedTracks    int                     `json:"expected_tracks"`
 	FoundTracks       int                     `json:"found_tracks"`
+	Disks             []DiskQualitySummary    `json:"disks"`
 	Tracks            map[string]TrackQuality `json:"tracks"`
 	LastEvaluated     time.Time               `json:"last_evaluated"`
 }
