@@ -1738,5 +1738,123 @@ func TestGetQualityCacheHitWithDisks(t *testing.T) {
 	}
 }
 
+func TestFormatTrackDuration(t *testing.T) {
+	tests := []struct {
+		name     string
+		seconds  float64
+		expected string
+	}{
+		{"zero", 0.0, "00:00"},
+		{"five_seconds", 5.0, "00:05"},
+		{"round_down", 182.4, "03:02"},
+		{"round_up", 182.6, "03:03"},
+		{"under_one_hour", 3599.4, "59:59"},
+		{"hour_boundary", 3600.0, "01:00:00"},
+		{"over_one_hour", 4530.0, "01:15:30"},
+		{"multi_hour_ten_plus", 36300.0, "10:05:00"},
+		{"negative", -1.0, "ERROR"},
+		{"negative_large", -3600.0, "ERROR"},
+		{"nan", math.NaN(), "ERROR"},
+		{"pos_inf", math.Inf(1), "ERROR"},
+		{"neg_inf", math.Inf(-1), "ERROR"},
+	}
 
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatTrackDuration(tt.seconds)
+			if got != tt.expected {
+				t.Errorf("FormatTrackDuration(%v) = %q, expected %q", tt.seconds, got, tt.expected)
+			}
+		})
+	}
+}
 
+func TestQualitySummarySerializationWithDuration(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "quality_test_ser_duration")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	releaseID := int64(123456)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	original := &QualitySummary{
+		ReleaseID:         releaseID,
+		Version:           CurrentScoringVersion,
+		Score:             85,
+		CompletenessScore: 45,
+		CleanlinessScore:  40,
+		ExpectedTracks:    1,
+		FoundTracks:       1,
+		LastEvaluated:     now,
+		Tracks: map[string]TrackQuality{
+			"track1.flac": {
+				Filename:       "track1.flac",
+				SizeBytes:      1024,
+				ModTime:        now,
+				PeakDb:         -1.5,
+				RmsDb:          -14.2,
+				ClippedCount:   0,
+				DynamicRange:   12.7,
+				HasLongSilence: false,
+				Score:          40,
+				Duration:       "03:02",
+			},
+		},
+	}
+
+	if err := WriteQualitySummary(tempDir, releaseID, original); err != nil {
+		t.Fatalf("WriteQualitySummary failed: %v", err)
+	}
+
+	readSummary, err := ReadQualitySummary(tempDir, releaseID)
+	if err != nil {
+		t.Fatalf("ReadQualitySummary failed: %v", err)
+	}
+
+	track, ok := readSummary.Tracks["track1.flac"]
+	if !ok {
+		t.Fatalf("track1.flac missing from read summary")
+	}
+	if track.Duration != "03:02" {
+		t.Errorf("expected Duration '03:02', got %q", track.Duration)
+	}
+
+	// Test unmarshaling legacy quality.json without duration
+	legacyJSON := `{
+		"release_id": 99999,
+		"version": 3,
+		"score": 50,
+		"completeness_score": 25,
+		"cleanliness_score": 25,
+		"expected_tracks": 1,
+		"found_tracks": 1,
+		"tracks": {
+			"track_legacy.flac": {
+				"filename": "track_legacy.flac",
+				"size_bytes": 500,
+				"score": 25
+			}
+		}
+	}`
+	legacyDir := filepath.Join(tempDir, "99999")
+	if err := os.MkdirAll(legacyDir, 0755); err != nil {
+		t.Fatalf("failed to create legacy dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, "quality.json"), []byte(legacyJSON), 0644); err != nil {
+		t.Fatalf("failed to write legacy quality.json: %v", err)
+	}
+
+	legacySummary, err := ReadQualitySummary(tempDir, 99999)
+	if err != nil {
+		t.Fatalf("ReadQualitySummary for legacy failed: %v", err)
+	}
+	legacyTrack, ok := legacySummary.Tracks["track_legacy.flac"]
+	if !ok {
+		t.Fatalf("track_legacy.flac missing from legacy summary")
+	}
+	if legacyTrack.Duration != "" {
+		t.Errorf("expected empty Duration for legacy track, got %q", legacyTrack.Duration)
+	}
+}
