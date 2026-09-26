@@ -829,7 +829,7 @@ func TestQualityServerGetQualityEvaluation(t *testing.T) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to generate wav: %v", err)
 	}
-	flacPath := filepath.Join(relDir, "2002_track_001.flac")
+	flacPath := filepath.Join(relDir, "2002-2026-09-25_track_001.flac")
 	cmdFlac := exec.Command("flac", "--best", wavFile, "-o", flacPath)
 	if err := cmdFlac.Run(); err != nil {
 		t.Fatalf("failed to convert flac: %v", err)
@@ -1467,5 +1467,276 @@ func TestEvaluateRunCompletenessAndCleanliness(t *testing.T) {
 		t.Errorf("expected error for empty tracks, got nil")
 	}
 }
+
+func TestMultiDiskBottleneck(t *testing.T) {
+	tempDir := t.TempDir()
+	releaseID := int64(7001)
+
+	relDir := filepath.Join(tempDir, fmt.Sprintf("%d", releaseID))
+	if err := os.MkdirAll(relDir, 0755); err != nil {
+		t.Fatalf("failed to create release dir: %v", err)
+	}
+
+	// Disk 1 track (expected 1 track -> 50 completeness + clean audio -> ~90-100 score)
+	disk1Track := filepath.Join(relDir, "7001_1-2026-09-25_track_01.flac")
+	if err := exec.Command("sox", "-n", "-r", "44100", "-c", "2", disk1Track, "synth", "0.1", "sine", "1000", "pad", "0", "1.5", "repeat", "5", "vol", "-3dB").Run(); err != nil {
+		t.Fatalf("failed to create disk 1 audio: %v", err)
+	}
+
+	// Disk 2 corrupt track: 1 corrupt track out of 2 expected tracks -> completeness 25, cleanliness 0 -> score 25
+	disk2Track := filepath.Join(relDir, "7001_2-2026-09-25_track_01.flac")
+	if err := os.WriteFile(disk2Track, []byte("NOT_A_VALID_FLAC_AUDIO"), 0644); err != nil {
+		t.Fatalf("failed to create disk 2 corrupt file: %v", err)
+	}
+
+	mockClient := &mockRecordCollectionClient{
+		getRecordFunc: func(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error) {
+			return &pbrc.GetRecordResponse{
+				Record: &pbrc.Record{
+					Release: &pbgd.Release{
+						Id:             int32(releaseID),
+						FormatQuantity: 2,
+						Tracklist: []*pbgd.Track{
+							{Title: "Disk 1 Track 1", Position: "1-1"},
+							{Title: "Disk 2 Track 1", Position: "2-1"},
+							{Title: "Disk 2 Track 2", Position: "2-2"},
+						},
+					},
+				},
+			}, nil
+		},
+	}
+
+	server := NewQualityServer(tempDir, mockClient)
+	resp, err := server.GetQuality(context.Background(), &pb.GetQualityRequest{ReleaseId: releaseID})
+	if err != nil {
+		t.Fatalf("GetQuality failed: %v", err)
+	}
+
+	if len(resp.GetDiskQualities()) != 2 {
+		t.Fatalf("expected 2 disk qualities, got %d", len(resp.GetDiskQualities()))
+	}
+
+	d1 := resp.GetDiskQualities()[0]
+	d2 := resp.GetDiskQualities()[1]
+
+	if d1.GetDisk() != 1 || d2.GetDisk() != 2 {
+		t.Errorf("unexpected disk numbers: d1=%d, d2=%d", d1.GetDisk(), d2.GetDisk())
+	}
+
+	if d1.GetScore() <= d2.GetScore() {
+		t.Errorf("expected disk 1 score (%d) > disk 2 score (%d)", d1.GetScore(), d2.GetScore())
+	}
+
+	// Bottleneck composite score must equal min(disk1, disk2)
+	expectedScore := d2.GetScore()
+	if resp.GetScore() != expectedScore {
+		t.Errorf("expected bottleneck release score %d, got %d", expectedScore, resp.GetScore())
+	}
+}
+
+func TestMissingDiskHandling(t *testing.T) {
+	tempDir := t.TempDir()
+	releaseID := int64(7002)
+
+	relDir := filepath.Join(tempDir, fmt.Sprintf("%d", releaseID))
+	if err := os.MkdirAll(relDir, 0755); err != nil {
+		t.Fatalf("failed to create release dir: %v", err)
+	}
+
+	// 2-disk release with only Disk 1 recorded
+	disk1Track := filepath.Join(relDir, "7002_1-2026-09-25_track_01.flac")
+	if err := exec.Command("sox", "-n", "-r", "44100", "-c", "2", disk1Track, "synth", "0.1", "sine", "1000", "pad", "0", "1.5", "repeat", "5", "vol", "-3dB").Run(); err != nil {
+		t.Fatalf("failed to create disk 1 audio: %v", err)
+	}
+
+	mockClient := &mockRecordCollectionClient{
+		getRecordFunc: func(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error) {
+			return &pbrc.GetRecordResponse{
+				Record: &pbrc.Record{
+					Release: &pbgd.Release{
+						Id:             int32(releaseID),
+						FormatQuantity: 2,
+						Tracklist: []*pbgd.Track{
+							{Title: "Disk 1 Track 1", Position: "1-1"},
+							{Title: "Disk 2 Track 1", Position: "2-1"},
+						},
+					},
+				},
+			}, nil
+		},
+	}
+
+	server := NewQualityServer(tempDir, mockClient)
+	resp, err := server.GetQuality(context.Background(), &pb.GetQualityRequest{ReleaseId: releaseID})
+	if err != nil {
+		t.Fatalf("GetQuality failed: %v", err)
+	}
+
+	// Overall score must be 0 because Disk 2 is missing
+	if resp.GetScore() != 0 {
+		t.Errorf("expected overall score 0 for missing disk release, got %d", resp.GetScore())
+	}
+
+	if len(resp.GetDiskQualities()) != 2 {
+		t.Fatalf("expected 2 disk qualities, got %d", len(resp.GetDiskQualities()))
+	}
+
+	d1 := resp.GetDiskQualities()[0]
+	d2 := resp.GetDiskQualities()[1]
+
+	if d1.GetDisk() != 1 || d1.GetScore() <= 0 {
+		t.Errorf("expected disk 1 to have score > 0, got disk=%d score=%d", d1.GetDisk(), d1.GetScore())
+	}
+
+	if d2.GetDisk() != 2 || d2.GetScore() != 0 || d2.GetBestRipDate() != "" {
+		t.Errorf("expected disk 2 to have score 0 and empty rip date, got disk=%d score=%d date=%q", d2.GetDisk(), d2.GetScore(), d2.GetBestRipDate())
+	}
+}
+
+func TestSingleDiskNormalization(t *testing.T) {
+	tempDir := t.TempDir()
+	releaseID := int64(7003)
+
+	relDir := filepath.Join(tempDir, fmt.Sprintf("%d", releaseID))
+	if err := os.MkdirAll(relDir, 0755); err != nil {
+		t.Fatalf("failed to create release dir: %v", err)
+	}
+
+	// Single-disk release with disk 0 in filename
+	disk0Track := filepath.Join(relDir, "7003_0-2026-09-25_track_01.flac")
+	if err := exec.Command("sox", "-n", "-r", "44100", "-c", "2", disk0Track, "synth", "0.1", "sine", "1000", "pad", "0", "1.5", "repeat", "5", "vol", "-3dB").Run(); err != nil {
+		t.Fatalf("failed to create disk 0 audio: %v", err)
+	}
+
+	mockClient := &mockRecordCollectionClient{
+		getRecordFunc: func(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error) {
+			return &pbrc.GetRecordResponse{
+				Record: &pbrc.Record{
+					Release: &pbgd.Release{
+						Id:             int32(releaseID),
+						FormatQuantity: 1,
+						Tracklist: []*pbgd.Track{
+							{Title: "Track 1", Position: "1"},
+						},
+					},
+				},
+			}, nil
+		},
+	}
+
+	server := NewQualityServer(tempDir, mockClient)
+	resp, err := server.GetQuality(context.Background(), &pb.GetQualityRequest{ReleaseId: releaseID})
+	if err != nil {
+		t.Fatalf("GetQuality failed: %v", err)
+	}
+
+	if len(resp.GetDiskQualities()) != 1 {
+		t.Fatalf("expected 1 disk quality, got %d", len(resp.GetDiskQualities()))
+	}
+
+	dq := resp.GetDiskQualities()[0]
+	if dq.GetDisk() != 1 {
+		t.Errorf("expected disk number normalized to 1, got %d", dq.GetDisk())
+	}
+	if dq.GetScore() <= 0 {
+		t.Errorf("expected score > 0, got %d", dq.GetScore())
+	}
+	if resp.GetScore() != dq.GetScore() {
+		t.Errorf("expected overall score %d matching disk 1 score, got %d", dq.GetScore(), resp.GetScore())
+	}
+}
+
+func TestGetQualityCacheHitWithDisks(t *testing.T) {
+	tempDir := t.TempDir()
+	releaseID := int64(7004)
+
+	relDir := filepath.Join(tempDir, fmt.Sprintf("%d", releaseID))
+	if err := os.MkdirAll(relDir, 0755); err != nil {
+		t.Fatalf("failed to create release dir: %v", err)
+	}
+
+	flac1 := filepath.Join(relDir, "7004_1-2026-09-25_track_01.flac")
+	if err := os.WriteFile(flac1, []byte("audio1"), 0644); err != nil {
+		t.Fatalf("failed to write flac1: %v", err)
+	}
+	flac2 := filepath.Join(relDir, "7004_2-2026-09-25_track_01.flac")
+	if err := os.WriteFile(flac2, []byte("audio2"), 0644); err != nil {
+		t.Fatalf("failed to write flac2: %v", err)
+	}
+
+	info1, _ := os.Stat(flac1)
+	info2, _ := os.Stat(flac2)
+
+	summary := &QualitySummary{
+		ReleaseID:         releaseID,
+		Version:           CurrentScoringVersion,
+		Score:             75,
+		CompletenessScore: 40,
+		CleanlinessScore:  35,
+		ExpectedTracks:    2,
+		FoundTracks:       2,
+		LastEvaluated:     time.Now().UTC(),
+		Disks: []DiskQualitySummary{
+			{
+				Disk:        1,
+				BestRipDate: "2026-09-20",
+				Score:       90,
+			},
+			{
+				Disk:        2,
+				BestRipDate: "2026-09-25",
+				Score:       75,
+			},
+		},
+		Tracks: map[string]TrackQuality{
+			"7004_1-2026-09-25_track_01.flac": {
+				Filename:  "7004_1-2026-09-25_track_01.flac",
+				SizeBytes: info1.Size(),
+				ModTime:   info1.ModTime(),
+				Score:     45,
+			},
+			"7004_2-2026-09-25_track_01.flac": {
+				Filename:  "7004_2-2026-09-25_track_01.flac",
+				SizeBytes: info2.Size(),
+				ModTime:   info2.ModTime(),
+				Score:     30,
+			},
+		},
+	}
+
+	if err := WriteQualitySummary(tempDir, releaseID, summary); err != nil {
+		t.Fatalf("failed to write summary: %v", err)
+	}
+
+	mockClient := &mockRecordCollectionClient{
+		getRecordFunc: func(ctx context.Context, in *pbrc.GetRecordRequest, opts ...grpc.CallOption) (*pbrc.GetRecordResponse, error) {
+			t.Fatalf("rcClient should not be dialed on cache hit")
+			return nil, status.Errorf(codes.Internal, "unexpected call")
+		},
+	}
+
+	server := NewQualityServer(tempDir, mockClient)
+	resp, err := server.GetQuality(context.Background(), &pb.GetQualityRequest{ReleaseId: releaseID})
+	if err != nil {
+		t.Fatalf("GetQuality failed: %v", err)
+	}
+
+	if resp.GetScore() != 75 {
+		t.Errorf("expected score 75, got %d", resp.GetScore())
+	}
+
+	if len(resp.GetDiskQualities()) != 2 {
+		t.Fatalf("expected 2 disk qualities from cache, got %d", len(resp.GetDiskQualities()))
+	}
+
+	if resp.GetDiskQualities()[0].GetDisk() != 1 || resp.GetDiskQualities()[0].GetScore() != 90 || resp.GetDiskQualities()[0].GetBestRipDate() != "2026-09-20" {
+		t.Errorf("unexpected disk 1 from cache: %v", resp.GetDiskQualities()[0])
+	}
+	if resp.GetDiskQualities()[1].GetDisk() != 2 || resp.GetDiskQualities()[1].GetScore() != 75 || resp.GetDiskQualities()[1].GetBestRipDate() != "2026-09-25" {
+		t.Errorf("unexpected disk 2 from cache: %v", resp.GetDiskQualities()[1])
+	}
+}
+
 
 
