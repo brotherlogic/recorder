@@ -683,30 +683,98 @@ func (s *QualityServer) GetQuality(ctx context.Context, req *pb.GetQualityReques
 
 	// 1. Check quality.json disk cache; return cached score immediately on cache hit.
 	if cached, ok := GetValidCachedSummary(dir, releaseID); ok && cached != nil {
-		return &pb.GetQualityResponse{Score: cached.Score}, nil
+		var diskQualities []*pb.DiskQuality
+		for _, d := range cached.Disks {
+			diskQualities = append(diskQualities, &pb.DiskQuality{
+				Disk:        d.Disk,
+				BestRipDate: d.BestRipDate,
+				Score:       d.Score,
+			})
+		}
+		return &pb.GetQualityResponse{
+			Score:         cached.Score,
+			DiskQualities: diskQualities,
+		}, nil
 	}
 
 	// 2. On cache miss or invalidated cache:
-	// Compute completeness score (0-50).
-	completenessRes, err := EvaluateCompleteness(ctx, s.rcClient, dir, releaseID)
+	// Fetch metadata from recordcollection (to obtain FormatQuantity and per-disk expected track counts via getExpectedTracks).
+	rel, err := GetReleaseMetadata(ctx, s.rcClient, releaseID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Compute cleanliness score (0-50).
-	tracksMap := make(map[string]TrackQuality)
-	for _, file := range completenessRes.Files {
-		tq, err := AnalyzeTrack(file)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to analyze track %s: %v", file, err)
-		}
-		tq.Filename = filepath.Base(file)
-		tracksMap[filepath.Base(file)] = *tq
+	// Scan files and parse into disk/run groups via GroupTracksByDiskAndRun.
+	files, err := ScanFlacFiles(dir, releaseID)
+	if err != nil {
+		return nil, err
 	}
-	cleanlinessScore := CalculateAggregateCleanlinessFromMap(tracksMap)
+	if len(files) == 0 {
+		return nil, status.Errorf(codes.NotFound, "no FLAC files found for release %d", releaseID)
+	}
 
-	// Calculate composite score: TotalScore = CompletenessScore + CleanlinessScore (clamped strictly 0 to 100).
-	totalScore := completenessRes.Score + cleanlinessScore
+	diskRuns, err := GroupTracksByDiskAndRun(files, releaseID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to group tracks: %v", err)
+	}
+
+	formatQuantity := rel.GetFormatQuantity()
+	if formatQuantity <= 0 {
+		formatQuantity = 1
+	}
+
+	var diskSummaries []DiskQualitySummary
+	var diskQualities []*pb.DiskQuality
+	combinedTracks := make(map[string]TrackQuality)
+
+	for d := int32(1); d <= formatQuantity; d++ {
+		expectedTracks := getExpectedTracks(rel, d)
+		runs, hasRuns := diskRuns[d]
+		if hasRuns && len(runs) > 0 {
+			dSummary, trackMap, err := EvaluateDiskRuns(d, runs, expectedTracks)
+			if err != nil {
+				return nil, err
+			}
+			diskSummaries = append(diskSummaries, *dSummary)
+			diskQualities = append(diskQualities, &pb.DiskQuality{
+				Disk:        dSummary.Disk,
+				BestRipDate: dSummary.BestRipDate,
+				Score:       dSummary.Score,
+			})
+			for k, v := range trackMap {
+				base := filepath.Base(k)
+				v.Filename = base
+				combinedTracks[base] = v
+			}
+		} else {
+			dSummary := DiskQualitySummary{
+				Disk:        d,
+				BestRipDate: "",
+				Score:       0,
+			}
+			diskSummaries = append(diskSummaries, dSummary)
+			diskQualities = append(diskQualities, &pb.DiskQuality{
+				Disk:        d,
+				BestRipDate: "",
+				Score:       0,
+			})
+		}
+	}
+
+	// Composite release score:
+	// For multi-disk releases: min(disk_1, ..., disk_N). If any expected disk is missing, composite score is 0.
+	// For single-disk releases: winning score of Disk 1.
+	var totalScore int32
+	if len(diskSummaries) > 0 {
+		totalScore = diskSummaries[0].Score
+		if formatQuantity > 1 {
+			for _, ds := range diskSummaries[1:] {
+				if ds.Score < totalScore {
+					totalScore = ds.Score
+				}
+			}
+		}
+	}
 	if totalScore < 0 {
 		totalScore = 0
 	} else if totalScore > 100 {
@@ -714,20 +782,22 @@ func (s *QualityServer) GetQuality(ctx context.Context, req *pb.GetQualityReques
 	}
 
 	summary := &QualitySummary{
-		ReleaseID:         releaseID,
-		Version:           CurrentScoringVersion,
-		Score:             totalScore,
-		CompletenessScore: completenessRes.Score,
-		CleanlinessScore:  cleanlinessScore,
-		ExpectedTracks:    completenessRes.ExpectedTracks,
-		FoundTracks:       completenessRes.FoundTracks,
-		Tracks:            tracksMap,
-		LastEvaluated:     time.Now().UTC(),
+		ReleaseID:      releaseID,
+		Version:        CurrentScoringVersion,
+		Score:          totalScore,
+		ExpectedTracks: CalculateTotalExpectedTracks(rel),
+		FoundTracks:    len(files),
+		Disks:          diskSummaries,
+		Tracks:         combinedTracks,
+		LastEvaluated:  time.Now().UTC(),
 	}
 
 	if err := WriteQualitySummary(dir, releaseID, summary); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to write quality summary: %v", err)
 	}
 
-	return &pb.GetQualityResponse{Score: totalScore}, nil
+	return &pb.GetQualityResponse{
+		Score:         totalScore,
+		DiskQualities: diskQualities,
+	}, nil
 }

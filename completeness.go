@@ -43,12 +43,12 @@ func CalculateTotalExpectedTracks(release *pbgd.Release) int {
 	return total
 }
 
-// GetTotalExpectedTracks queries the recordcollection service for release metadata and calculates total expected tracks across all discs.
-func GetTotalExpectedTracks(ctx context.Context, client pbrc.RecordCollectionServiceClient, releaseID int64) (int, error) {
+// GetReleaseMetadata queries recordcollection for the release protobuf.
+func GetReleaseMetadata(ctx context.Context, client pbrc.RecordCollectionServiceClient, releaseID int64) (*pbgd.Release, error) {
 	if client == nil {
 		conn, err := utils.LFDialServer(ctx, "recordcollection")
 		if err != nil {
-			return 0, status.Errorf(codes.Unavailable, "failed to dial recordcollection: %v", err)
+			return nil, status.Errorf(codes.Unavailable, "failed to dial recordcollection: %v", err)
 		}
 		defer conn.Close()
 		client = pbrc.NewRecordCollectionServiceClient(conn)
@@ -60,21 +60,31 @@ func GetTotalExpectedTracks(ctx context.Context, client pbrc.RecordCollectionSer
 		if ok {
 			switch st.Code() {
 			case codes.NotFound:
-				return 0, status.Errorf(codes.NotFound, "release %d not found in recordcollection: %v", releaseID, err)
+				return nil, status.Errorf(codes.NotFound, "release %d not found in recordcollection: %v", releaseID, err)
 			case codes.Unavailable, codes.DeadlineExceeded:
-				return 0, status.Errorf(codes.Unavailable, "recordcollection service unavailable: %v", err)
+				return nil, status.Errorf(codes.Unavailable, "recordcollection service unavailable: %v", err)
 			default:
-				return 0, status.Errorf(codes.Unavailable, "recordcollection error: %v", err)
+				return nil, status.Errorf(codes.Unavailable, "recordcollection error: %v", err)
 			}
 		}
-		return 0, status.Errorf(codes.Unavailable, "recordcollection error: %v", err)
+		return nil, status.Errorf(codes.Unavailable, "recordcollection error: %v", err)
 	}
 
 	if res == nil || res.GetRecord() == nil || res.GetRecord().GetRelease() == nil {
-		return 0, status.Errorf(codes.NotFound, "release %d has no metadata", releaseID)
+		return nil, status.Errorf(codes.NotFound, "release %d has no metadata", releaseID)
 	}
 
-	expected := CalculateTotalExpectedTracks(res.GetRecord().GetRelease())
+	return res.GetRecord().GetRelease(), nil
+}
+
+// GetTotalExpectedTracks queries the recordcollection service for release metadata and calculates total expected tracks across all discs.
+func GetTotalExpectedTracks(ctx context.Context, client pbrc.RecordCollectionServiceClient, releaseID int64) (int, error) {
+	rel, err := GetReleaseMetadata(ctx, client, releaseID)
+	if err != nil {
+		return 0, err
+	}
+
+	expected := CalculateTotalExpectedTracks(rel)
 	if expected <= 0 {
 		return 0, status.Errorf(codes.NotFound, "release %d has no expected tracks", releaseID)
 	}
